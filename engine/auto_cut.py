@@ -11,7 +11,7 @@ auto_cut.py — 통합 자동 편집 엔진
 원본은 건드리지 않음(비파괴). 불러온 시퀀스는 전부 수정 가능.
 """
 
-import sys, os, json, difflib, bisect
+import sys, os, json, difflib, bisect, re, subprocess
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import silence_cut as SC
@@ -133,6 +133,86 @@ def find_repeats(sw):
         else:
             i += 1
     return ranges, rep
+
+
+def find_ng(sw):
+    """NG(재촬영) 컷 제거. '다시 할게요/스톱/엔지' 같은 재촬영 신호어 뒤에
+    같은 말을 다시 하면(=진짜 NG) 앞 실패 테이크 + 신호어를 통째로 제거.
+    재시도가 없으면 건드리지 않아 오탐을 막는다(신호어가 본문 내용일 때 안전)."""
+    markers = set(CFG.get("NG_MARKERS", []))
+    if not markers:
+        return [], []
+    gap_max = CFG["REPEAT_GAP"]
+    ratio_min = CFG.get("FUZZY_RATIO", 0.7)
+    pad = CFG["FILLER_PAD"]
+    toks = [norm(t) for (_, _, t) in sw]
+    n = len(sw)
+    removed = [False] * n
+
+    def gap(i):
+        return sw[i + 1][0] - sw[i][1]
+
+    i = 0
+    while i < n:
+        if removed[i] or not toks[i]:
+            i += 1; continue
+        # 신호어(1~2어절 결합)가 여기서 시작하나?
+        hit = 0
+        for span in (2, 1):
+            if i + span <= n and "".join(toks[i:i + span]) in markers:
+                hit = span; break
+        if not hit:
+            i += 1; continue
+        m_end = i + hit                             # 신호어 다음
+        # 실패 테이크: 신호어 앞에서 큰 쉼(>gap_max) 전까지 거슬러 올라감
+        b = i
+        while b - 1 >= 0 and not removed[b - 1] and (sw[b][0] - sw[b - 1][1]) <= gap_max:
+            b -= 1
+        pre = "".join(toks[b:i])                    # 실패 테이크 텍스트
+        # 재시도: 신호어 뒤 같은 길이 근방
+        post = "".join(toks[m_end:m_end + max(2, (i - b) + 2)])
+        if pre and post and len(pre) >= 2 and (m_end >= n or gap(m_end - 1) <= gap_max + 0.6):
+            r = difflib.SequenceMatcher(None, pre, post[:len(pre) + 4]).ratio()
+            if r >= ratio_min:                     # 진짜 재촬영 → 앞 테이크+신호어 제거
+                for x in range(b, m_end):
+                    removed[x] = True
+                i = m_end; continue
+        i = m_end
+
+    ranges, log = [], []
+    i = 0
+    while i < n:
+        if removed[i]:
+            j = i
+            while j + 1 < n and removed[j + 1]:
+                j += 1
+            ranges.append([max(0.0, sw[i][0] - pad), sw[j][1] + pad])
+            log.append((sw[i][0], sw[j][1], "NG: " + " ".join(sw[x][2] for x in range(i, j + 1))))
+            i = j + 1
+        else:
+            i += 1
+    return ranges, log
+
+
+def measure_noise_floor(video, sil_keeps, total):
+    """가장 긴 무음 구간의 평균 볼륨(dBFS) = 노이즈 플로어. 측정 불가면 None."""
+    gaps, prev = [], 0.0
+    for a, b in sil_keeps:
+        if a > prev:
+            gaps.append((prev, a))
+        prev = b
+    if prev < total:
+        gaps.append((prev, total))
+    gaps = [g for g in gaps if g[1] - g[0] >= 0.4]
+    if not gaps:
+        return None
+    s, e = max(gaps, key=lambda g: g[1] - g[0])
+    p = subprocess.run(
+        [SC.FFMPEG, "-hide_banner", "-ss", f"{s:.2f}", "-t", f"{min(e - s, 3.0):.2f}",
+         "-i", video, "-map", "0:a:0", "-af", "volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True)
+    m = re.search(r"mean_volume:\s*(-?[0-9.]+)", p.stderr or "")
+    return float(m.group(1)) if m else None
 
 
 def merge_ranges(ranges):
@@ -299,16 +379,26 @@ def main():
     sil_keeps = keep_ranges_from_silence(detect_silence(video), info["duration"])
     kept_sil = sum(b - a for a, b in sil_keeps)
 
-    print("> 음량 분석 + 오디오 정리 중...")
+    print("> 음량 분석 + 음성보정 중...")
     loud = measure_loudness(video)
     extra = []
-    if CFG.get("DENOISE"):
-        extra.append("afftdn")
+    # 음성보정: 무음(노이즈플로어) 측정 → 시끄러우면 자동 노이즈 제거(깨끗하면 건너뜀)
+    denoise = CFG.get("DENOISE", False)
+    nfloor = None
+    if not denoise and CFG.get("AUTO_DENOISE"):
+        nfloor = measure_noise_floor(video, sil_keeps, info["duration"])
+        if nfloor is not None and nfloor > CFG.get("NOISE_FLOOR_DB", -50.0):
+            denoise = True
+    if denoise:
+        extra.append(f"afftdn=nr={CFG.get('DENOISE_STRENGTH', 10)}")
     if CFG.get("DEESS"):
         extra.append("deesser")
     extra_filters = (",".join(extra) + ",") if extra else ""
     if extra:
-        print(f"   오디오 후처리: {', '.join(extra)}")
+        note = f" (노이즈플로어 {nfloor:.0f}dB)" if nfloor is not None else ""
+        print(f"   음성보정: {', '.join(extra)}{note}")
+    elif nfloor is not None:
+        print(f"   음성보정: 노이즈플로어 {nfloor:.0f}dB → 깨끗, 노이즈제거 생략")
     ok = make_clean_audio(video, wav_out, info, extra_filters=extra_filters)
     clean_audio = wav_out if ok else None
     if clean_audio:
@@ -322,7 +412,7 @@ def main():
     # ── 제거 구간 계산 ──
     keeps = sil_keeps
     removes = []
-    report = {"추임새": [], "망설임": [], "더듬/중복": [], "숨소리": []}
+    report = {"추임새": [], "망설임": [], "더듬/중복": [], "NG": [], "숨소리": []}
     sw = sorted(words, key=lambda w: w[0])
     fpad = CFG["FILLER_PAD"]
 
@@ -352,6 +442,11 @@ def main():
         rep_ranges, rep_log = find_repeats(sw)
         removes += rep_ranges
         report["더듬/중복"] = rep_log
+
+    if CFG.get("REMOVE_NG"):
+        ng_ranges, ng_log = find_ng(sw)
+        removes += ng_ranges
+        report["NG"] = ng_log
 
     if CFG.get("ACOUSTIC_FILLER") and clean_audio:
         try:
@@ -403,18 +498,19 @@ def main():
     if removes:
         keeps = subtract(sil_keeps, removes)
         kept_now = sum(b - a for a, b in keeps)
-        nf, nh, nr, nb = (len(report["추임새"]), len(report["망설임"]),
-                          len(report["더듬/중복"]), len(report["숨소리"]))
+        nf, nh, nr, nng, nb = (len(report["추임새"]), len(report["망설임"]),
+                               len(report["더듬/중복"]), len(report["NG"]), len(report["숨소리"]))
         ctx = f" (문맥상 '좀' {n_kept_ctx}개 살림)" if n_kept_ctx else ""
         parts = []
         if nf or nh: parts.append(f"추임새 {nf} + 망설임 {nh}")
         if nr: parts.append(f"더듬/중복 {nr}")
+        if nng: parts.append(f"NG {nng}")
         if nb: parts.append(f"숨소리 {nb}")
         print(f"   {' + '.join(parts) or '제거 없음'} 제거{ctx} "
               f"→ 추가로 {fmt(kept_sil - kept_now)} 단축")
         rep_out = os.path.join(outdir, base + "_cut_report.txt")
         with open(rep_out, "w", encoding="utf-8") as f:
-            for cat in ("추임새", "망설임", "더듬/중복", "숨소리"):
+            for cat in ("추임새", "망설임", "더듬/중복", "NG", "숨소리"):
                 f.write(f"━━━ {cat} ({len(report[cat])}개) ━━━\n")
                 for s, e, t in report[cat]:
                     f.write(f"  {srt_time(s)}  {t}\n")
