@@ -31,6 +31,8 @@ DEFAULTS = {
     "NOISE_FLOOR_DB": -50.0,  # 무음 구간 평균이 이보다 크면(=시끄러우면) 노이즈 제거 적용
     "DEESS": True,            # deesser 치찰음(ㅅ,ㅊ) 완화 — 안전하고 프로 기본
     "DENOISE_STRENGTH": 10,   # afftdn nr(dB). 낮을수록 은은(아티팩트 최소)
+    # 음성 톤: natural(투명하게 정리) / podcast(따뜻·프레즌스·강한 압축으로 일정하게)
+    "AUDIO_STYLE": "natural",
 
     # 추임새 — 기본 OFF. 아/어/음/뭐 등을 자르면 말맛이 사라져 부자연스러움(비블 피드백).
     # 추임새까지 타이트하게 빼려면 '공격' 프리셋을 쓴다.

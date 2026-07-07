@@ -342,18 +342,25 @@ def main():
     global CFG
     args = [a for a in sys.argv[1:]]
     preset = "표준"
+    audio_style = None
     if "--preset" in args:
         i = args.index("--preset")
         preset = args[i + 1]
         del args[i:i + 2]
+    if "--audio" in args:                       # natural | podcast
+        i = args.index("--audio")
+        audio_style = args[i + 1]
+        del args[i:i + 2]
     if not args:
-        print("사용: python3 auto_cut.py \"<원본영상>\" [--preset 보수|표준|공격]"); sys.exit(1)
+        print("사용: python3 auto_cut.py \"<원본영상>\" [--preset 보수|표준|공격] [--audio natural|podcast]"); sys.exit(1)
     video = args[0]
     if not os.path.exists(video):
         print("파일 없음:", video); sys.exit(1)
 
     proj = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     CFG = CONFIG.load(preset, project_dir=proj)
+    if audio_style:
+        CFG["AUDIO_STYLE"] = audio_style
     apply_config_to_modules()
 
     base = os.path.splitext(os.path.basename(video))[0]
@@ -381,7 +388,6 @@ def main():
 
     print("> 음량 분석 + 음성보정 중...")
     loud = measure_loudness(video)
-    extra = []
     # 음성보정: 무음(노이즈플로어) 측정 → 시끄러우면 자동 노이즈 제거(깨끗하면 건너뜀)
     denoise = CFG.get("DENOISE", False)
     nfloor = None
@@ -389,17 +395,33 @@ def main():
         nfloor = measure_noise_floor(video, sil_keeps, info["duration"])
         if nfloor is not None and nfloor > CFG.get("NOISE_FLOOR_DB", -50.0):
             denoise = True
+    pre = []
     if denoise:
-        extra.append(f"afftdn=nr={CFG.get('DENOISE_STRENGTH', 10)}")
+        pre.append(f"afftdn=nr={CFG.get('DENOISE_STRENGTH', 10)}")
     if CFG.get("DEESS"):
-        extra.append("deesser")
-    extra_filters = (",".join(extra) + ",") if extra else ""
-    if extra:
-        note = f" (노이즈플로어 {nfloor:.0f}dB)" if nfloor is not None else ""
-        print(f"   음성보정: {', '.join(extra)}{note}")
-    elif nfloor is not None:
-        print(f"   음성보정: 노이즈플로어 {nfloor:.0f}dB → 깨끗, 노이즈제거 생략")
-    ok = make_clean_audio(video, wav_out, info, extra_filters=extra_filters)
+        pre.append("deesser")
+    pre_f = (",".join(pre) + ",") if pre else ""
+    lufs = CFG.get("TARGET_LUFS", -14.0)
+    nf_note = f" · 노이즈플로어 {nfloor:.0f}dB" if nfloor is not None else ""
+    style = CFG.get("AUDIO_STYLE", "natural")
+    if style == "podcast":
+        # 팟캐스트 톤: 따뜻함(저역 셸프)+박스니스 컷+프레즌스+공기감+강한 압축+타이트 라우드니스
+        chain = (f"highpass=f=80,{pre_f}"
+                 "equalizer=f=110:t=h:w=0.7:g=2,"
+                 "equalizer=f=330:t=q:w=1.2:g=-2,"
+                 "equalizer=f=4200:t=q:w=1.4:g=2.5,"
+                 "equalizer=f=11000:t=h:w=0.7:g=1.5,"
+                 "acompressor=threshold=-24dB:ratio=3.5:attack=6:release=160:makeup=4,"
+                 f"loudnorm=I={lufs}:TP=-1.5:LRA=8")
+        print(f"   음성보정: 팟캐스트 톤(따뜻+프레즌스+공기감+압축){nf_note}"
+              + (" · afftdn" if denoise else "") + (" · deesser" if CFG.get('DEESS') else ""))
+        ok = make_clean_audio(video, wav_out, info, chain=chain)
+    else:
+        if pre:
+            print(f"   음성보정: {', '.join(pre)}{nf_note}")
+        elif nfloor is not None:
+            print(f"   음성보정: 노이즈플로어 {nfloor:.0f}dB → 깨끗, 노이즈제거 생략")
+        ok = make_clean_audio(video, wav_out, info, extra_filters=pre_f)
     clean_audio = wav_out if ok else None
     if clean_audio:
         after = measure_loudness(wav_out)

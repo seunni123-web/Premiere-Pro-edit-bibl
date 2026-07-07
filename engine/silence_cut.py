@@ -124,13 +124,15 @@ VOICE_CHAIN = ("highpass=f=80,"
                f"loudnorm=I={TARGET_LUFS}:TP=-1.5:LRA=11")
 
 
-def make_clean_audio(path, out_wav, info, extra_filters=""):
+def make_clean_audio(path, out_wav, info, extra_filters="", chain=None):
     """원본 전체 길이를 그대로 두고 목소리만 정리한 WAV 생성(비파괴 사이드카).
-       extra_filters: 노이즈제거/디에서 등 앞단에 끼울 추가 ffmpeg 필터(콤마 포함)."""
-    chain = (f"{extra_filters}" if extra_filters else "") + (
-        "highpass=f=80,"
-        "acompressor=threshold=-20dB:ratio=3:attack=5:release=150:makeup=2,"
-        f"loudnorm=I={TARGET_LUFS}:TP=-1.5:LRA=11")
+       chain: 전체 -af 필터 문자열을 직접 지정(팟캐스트 톤 등). 없으면 기본 체인.
+       extra_filters: (chain 미지정 시) 앞단에 끼울 추가 필터(노이즈제거/디에서, 콤마 포함)."""
+    if chain is None:
+        chain = (f"{extra_filters}" if extra_filters else "") + (
+            "highpass=f=80,"
+            "acompressor=threshold=-20dB:ratio=3:attack=5:release=150:makeup=2,"
+            f"loudnorm=I={TARGET_LUFS}:TP=-1.5:LRA=11")
     r = run([FFMPEG, "-hide_banner", "-y", "-i", path,
              "-af", chain, "-vn",
              "-c:a", "pcm_s16le", "-ar", str(info["samplerate"]),
