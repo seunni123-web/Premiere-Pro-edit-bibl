@@ -26,17 +26,19 @@ description: 비블 유튜브 영상 1개를 받아 기획→리서치→컷편�
 - 산출: `_cut.xml/_cut_audio.wav/_cut.srt/_cut_report.txt/_words.json` + `30_cut_result.md`.
 - **여기서 전사(`_words.json`)가 먼저 나와야** 리서처·기획자가 일한다.
 
-## Phase 3: 내용 분석 (콘텐츠 리서처)
-- `Agent(content-researcher, model:opus)` → `10_research.md` (핵심메시지·하이라이트·삭제추천·챕터).
+## Phase 3: 내용 분석 + 내용 컷 제안 (콘텐츠 리서처)
+- `Agent(content-researcher, model:opus)` → `10_research.md` (핵심메시지·하이라이트·챕터·검토요망)
+  + **`output/<base>_content_cuts.json`** (내용 컷 목록 — 라이브면 오프닝/닉네임 호명/Q&A/홍보/자체 컷마커/본문 사족).
+- **라이브 소스면 이 단계가 필수다.** 실측(2026-07): 비블은 96분 라이브에서 기계 컷 외 441곳·23.9분을 내용으로 잘랐다. 기계 컷만으로 라이브를 납품하지 않는다.
 
 ## Phase 4: 편집 기획 (영상 기획자)
-- `Agent(video-planner, model:opus)` → `20_plan.md` (인트로훅·흐름·프리셋추천·강조/B롤마커).
+- `Agent(video-planner, model:opus)` → `20_plan.md` (인트로훅·흐름·프리셋추천·강조/B롤마커 + 라이브면 본론 시작점·Q&A 배치).
 
 > 쇼츠는 이 파이프라인에서 **자동 생성하지 않는다.** 사용자가 **완성된 롱폼**을 따로 올리고 "숏폼 만들어줘"라고 할 때만 `shorts-production` 스킬로 별도 진행한다(온디맨드).
 
-## Phase 5: 최종 컷 (컷편집가, 조건부)
-- 기획의 프리셋/설정이 Phase 2와 다르면 `Agent(cut-editor, model:opus)`로 재실행. 같으면 건너뜀.
-- 내용상 삭제추천(`10_research.md`)이 있으면 config.json 또는 수동 구간으로 반영.
+## Phase 5: 최종 컷 (컷편집가)
+- `_content_cuts.json`이 생겼거나 기획의 프리셋/설정이 Phase 2와 다르면 `Agent(cut-editor, model:opus)`로 **재실행**(전사 캐시로 수 분). 엔진이 내용 컷을 자동 반영한다.
+- 둘 다 없으면 건너뜀.
 
 ## Phase 6: 자막 교정 (자막 에디터)
 - `Agent(subtitle-editor, model:opus)` → `_cut.srt` 교정본 + `40_subtitle_notes.md` (고유명사·줄균형·가독성).

@@ -194,6 +194,44 @@ def find_ng(sw):
     return ranges, log
 
 
+def word_snap(keeps, sw, pad=0.05, total=None):
+    """컷 경계가 전사된 단어를 관통하면 keep을 단어 경계까지 확장(어두/어미 잘림 방지).
+    단어의 중심이 keep 안에 있을 때만 확장 → 의도적으로 지운 단어는 되살리지 않는다."""
+    if not keeps or not sw:
+        return keeps, 0
+    words = sorted((s, e) for s, e, _t in sw)
+    starts = [w[0] for w in words]
+    fixed = 0
+    out = []
+    for a, b in keeps:
+        # 경계가 단어 내부를 '엄격히' 관통할 때만 스냅.
+        # (의도적 제거는 경계를 단어 밖 ±pad에 두므로 여기 안 걸림 —
+        #  걸렸다면 이미 단어 일부가 keep에 들려 있는 상태라 온전히 살리는 게 낫다)
+        i = bisect.bisect_right(starts, a) - 1
+        if i >= 0:
+            ws, we = words[i]
+            if ws < a < we:                    # 앞 경계가 단어 머리를 자름
+                a = max(0.0, ws - pad); fixed += 1
+        j = bisect.bisect_right(starts, b) - 1
+        if j >= 0:
+            ws, we = words[j]
+            if ws < b < we:                    # 뒤 경계가 단어 꼬리를 자름
+                b = we + pad; fixed += 1
+        if total is not None:
+            b = min(b, total)
+        if b > a:
+            out.append([a, b])
+    # 확장으로 생긴 겹침 병합
+    out.sort()
+    merged = []
+    for a, b in out:
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return merged, fixed
+
+
 def measure_noise_floor(video, sil_keeps, total):
     """가장 긴 무음 구간의 평균 볼륨(dBFS) = 노이즈 플로어. 측정 불가면 None."""
     gaps, prev = [], 0.0
@@ -448,6 +486,22 @@ def main():
                 removes.append([max(0.0, s - fpad), e + fpad])
                 report["추임새"].append((s, e, t))
 
+    # 내용 컷(에이전트/사용자 지정) — output/<base>_content_cuts.json 이 있으면 그 구간을 통째 제거
+    # 형식: [[start초, end초, "이유(선택)"], ...]  (원본 타임라인 기준)
+    cc_path = os.path.join(outdir, base + "_content_cuts.json")
+    if os.path.exists(cc_path):
+        try:
+            ccs = json.load(open(cc_path, encoding="utf-8"))
+            for item in ccs:
+                s, e = float(item[0]), float(item[1])
+                why = item[2] if len(item) > 2 else "(내용 컷)"
+                if e > s:
+                    removes.append([max(0.0, s), e])
+                    report.setdefault("내용컷", []).append((s, e, why))
+            print(f"   내용 컷 {len(ccs)}곳 반영 ({cc_path})")
+        except Exception as ex:
+            print(f"   [주의] 내용 컷 파일 파싱 실패: {ex}")
+
     if CFG["REMOVE_HESITATION"]:
         hmin, hpad = CFG["HESITATION_MIN"], CFG["HESITATION_PAD"]
         for i in range(len(sw) - 1):
@@ -522,21 +576,32 @@ def main():
         kept_now = sum(b - a for a, b in keeps)
         nf, nh, nr, nng, nb = (len(report["추임새"]), len(report["망설임"]),
                                len(report["더듬/중복"]), len(report["NG"]), len(report["숨소리"]))
+        ncc = len(report.get("내용컷", []))
         ctx = f" (문맥상 '좀' {n_kept_ctx}개 살림)" if n_kept_ctx else ""
         parts = []
         if nf or nh: parts.append(f"추임새 {nf} + 망설임 {nh}")
         if nr: parts.append(f"더듬/중복 {nr}")
         if nng: parts.append(f"NG {nng}")
+        if ncc: parts.append(f"내용컷 {ncc}")
         if nb: parts.append(f"숨소리 {nb}")
         print(f"   {' + '.join(parts) or '제거 없음'} 제거{ctx} "
               f"→ 추가로 {fmt(kept_sil - kept_now)} 단축")
         rep_out = os.path.join(outdir, base + "_cut_report.txt")
         with open(rep_out, "w", encoding="utf-8") as f:
-            for cat in ("추임새", "망설임", "더듬/중복", "NG", "숨소리"):
+            for cat in ("추임새", "망설임", "더듬/중복", "NG", "내용컷", "숨소리"):
+                if cat == "내용컷" and "내용컷" not in report:
+                    continue
                 f.write(f"━━━ {cat} ({len(report[cat])}개) ━━━\n")
                 for s, e, t in report[cat]:
                     f.write(f"  {srt_time(s)}  {t}\n")
                 f.write("\n")
+
+    # ── 단어 경계 스냅 가드: 컷 경계가 단어를 관통하면 단어 경계까지 확장(어두/어미 보호) ──
+    if CFG.get("WORD_SNAP", True) and sw:
+        keeps, n_snap = word_snap(keeps, sw, pad=CFG.get("WORD_SNAP_PAD", 0.05),
+                                  total=info["duration"])
+        if n_snap:
+            print(f"   단어 경계 보호: 컷 경계 {n_snap}곳을 단어 경계로 스냅")
 
     kept = sum(b - a for a, b in keeps)
     removed = info["duration"] - kept
