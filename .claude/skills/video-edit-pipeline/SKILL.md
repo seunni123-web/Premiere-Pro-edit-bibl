@@ -26,10 +26,11 @@ description: 비블 유튜브 영상 1개를 받아 기획→리서치→컷편�
 - 산출: `_cut.xml/_cut_audio.wav/_cut.srt/_cut_report.txt/_words.json` + `30_cut_result.md`.
 - **여기서 전사(`_words.json`)가 먼저 나와야** 리서처·기획자가 일한다.
 
-## Phase 3: 내용 분석 + 내용 컷 제안 (콘텐츠 리서처)
-- `Agent(content-researcher, model:opus)` → `10_research.md` (핵심메시지·하이라이트·챕터·검토요망)
-  + **`output/<base>_content_cuts.json`** (내용 컷 목록 — 라이브면 오프닝/닉네임 호명/Q&A/홍보/자체 컷마커/본문 사족).
-- **라이브 소스면 이 단계가 필수다.** 실측(2026-07): 비블은 96분 라이브에서 기계 컷 외 441곳·23.9분을 내용으로 잘랐다. 기계 컷만으로 라이브를 납품하지 않는다.
+## Phase 3: 내용 분석 + 내용 컷 제안 (콘텐츠 리서처, 확정/검토 2단)
+- `Agent(content-researcher, model:opus)` → `10_research.md`(핵심메시지·하이라이트·챕터)
+  + **`output/<base>_content_cuts.json`**(확정 컷: 오프닝/호명/홍보/아웃트로/자체컷마커/명백한 곁가지)
+  + **`11_content_cuts_review.md`**(검토: 긴 개별 Q&A·서사/철학 경계 → 디렉터가 1차 판정).
+- **라이브 소스면 이 단계가 필수다.** 4회 정량 측정으로 검증된 규칙: 긴 개별 Q&A는 통삭제, 단 **영상 서사 정체성·철학·마인드셋은 절대 보존**(잘못 자르면 완성본 망침). 기계 컷만으로 라이브를 납품하지 않는다.
 
 ## Phase 4: 편집 기획 (영상 기획자)
 - `Agent(video-planner, model:opus)` → `20_plan.md` (인트로훅·흐름·프리셋추천·강조/B롤마커 + 라이브면 본론 시작점·Q&A 배치).

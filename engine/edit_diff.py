@@ -154,7 +154,20 @@ def main():
         f.write("=== 엔진이 남긴 쉼을 사용자가 더 줄인 지점 — 큰 순 ===\n")
         for d, t, w, gm, gf in sorted(tighten, reverse=True):
             f.write(f"[{ts(t)}] '{w}' 뒤  {gm}s → {gf}s (−{d}s)\n")
+
+    # ── 정답(ground truth) JSON — 리서처 평가용 ──
+    # user_only = 비블이 '내용으로' 지운 구간(엔진은 남겼음). [초, 초, 텍스트] 원본 타임라인.
+    truth = [[round(s, 2), round(e, 2), text] for _dur, s, e, text, _kf
+             in sorted(user_only, key=lambda d: d[1])]
+    json.dump(truth, open(os.path.join(outdir, "truth_content_cuts.json"), "w",
+                          encoding="utf-8"), ensure_ascii=False)
+    # truth_all = 비블이 없앤 모든 발화(엔진이 이미 일부 지운 구간 포함) — 정밀도 채점의 공정한 분모
+    truth_all = [[round(s, 2), round(e, 2), text] for _dur, s, e, text, _kf
+                 in sorted(deleted, key=lambda d: d[1])]
+    json.dump(truth_all, open(os.path.join(outdir, "truth_all_deleted.json"), "w",
+                              encoding="utf-8"), ensure_ascii=False)
     print(f"\n상세 → {outdir}/diff_user_deleted.txt, diff_restored.txt, diff_tighten.txt")
+    print(f"정답 → {outdir}/truth_content_cuts.json ({len(truth)}구간)")
 
 if __name__ == "__main__":
     main()
