@@ -23,13 +23,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FONTS = os.path.join(HERE, "assets", "fonts")
 
 W, H = 1080, 1920
-MARGIN_MIN = 300          # 최소 상/하 여백(제목·워터마크 자리). 영상은 이 범위에서 세로 중앙.
+VID_H = 1500              # 영상(얼굴) 세로 크기 — 크게(더 확대). 세로 중앙 + 위아래 동일 여백.
 CAP_FRAC = 0.70           # 얼굴 아래(가슴 위) 자막 세로 위치(영상 영역 비율)
 WATERMARK = "비블 bibl"
 YELLOW = r"&H0022CCFF&"    # 골드 옐로 (BGR: R255 G204 B34)
 WHITE = r"&H00FFFFFF&"
 GRAY = r"&H00CFCFCF&"
-# 비블 슬라이드+PIP 소스 기본 웹캠 크롭(원본 비율 유지)
+# 폰트: PostScript/가중치별 패밀리명으로 지정(안 그러면 macOS CoreText가 Regular로 폴백 → 얇아짐)
+F_TITLE = "Paperlogy 9 Black"
+F_CAP = "Noto Sans CJK KR Black"
+F_WM = "MaruBuriot-SemiBold"
+# 비블 슬라이드+PIP 소스 기본 웹캠(얼굴) 영역. 이 안에서 9:16-세로로 더 확대 크롭.
 DEFAULT_CROP = dict(w=430, h=486, x=1486, y=474)
 
 
@@ -70,23 +74,30 @@ def split2(hook):
     return best[1], best[2]
 
 
-def geometry(crop):
-    """영상 크기·여백 계산: 풀와이드 + 세로 중앙 + 위아래 동일 여백."""
-    vid_h = round(W * crop["h"] / crop["w"] / 2) * 2
-    if (H - vid_h) // 2 < MARGIN_MIN:                     # 여백이 부족하면 영상을 줄여 확보
-        vid_h = H - 2 * MARGIN_MIN
-    vid_w = W
-    margin = (H - vid_h) // 2
-    return vid_w, vid_h, margin
+def zoom_crop(crop):
+    """얼굴 영역(crop) 안에서 풀와이드(W)×VID_H 비율로 더 확대해 잘라낸다.
+    좌우는 꽉 채우고(비지 않게), 위아래를 필요한 만큼 잘라 얼굴을 크게."""
+    aspect = W / VID_H                                    # 목표 영상 가로세로비 (0.72)
+    zw = min(crop["w"], round(crop["h"] * aspect))
+    zh = min(crop["h"], round(zw / aspect))
+    zx = crop["x"] + (crop["w"] - zw) // 2
+    zy = crop["y"] + (crop["h"] - zh) // 2                # 얼굴 중앙 기준 위아래 균등 크롭
+    return dict(w=int(zw), h=int(zh), x=int(zx), y=int(zy))
 
 
-def build_ass(hook, caps, dur, crop, yellow_line=2):
-    vid_w, vid_h, margin = geometry(crop)
+def geometry():
+    """풀와이드 + 세로 중앙 + 위아래 동일 여백."""
+    margin = (H - VID_H) // 2
+    return W, VID_H, margin
+
+
+def build_ass(hook, caps, dur, yellow_line=2):
+    vid_w, vid_h, margin = geometry()
     cap_y = margin + int(vid_h * CAP_FRAC)
     wm_y = H - margin // 2
     l1, l2 = split2(hook)
     maxlen = max(kchars(l1), kchars(l2))
-    tsize = 118 if maxlen <= 8 else (112 if maxlen <= 10 else 106)
+    tsize = 120 if maxlen <= 8 else (114 if maxlen <= 10 else 108)   # 지정 110~120
     c1 = YELLOW if yellow_line == 1 else WHITE
     c2 = YELLOW if yellow_line == 2 else WHITE
     title = f"{{\\c{c1}}}{l1}" + (f"\\N{{\\c{c2}}}{l2}" if l2 else "")
@@ -99,9 +110,9 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Title,Paperlogy,{tsize},&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,8,40,40,0,1
-Style: Cap,Noto Sans CJK KR,90,&H00FFFFFF,&H000000FF,&H00101010,&H80000000,0,0,0,0,100,100,0.5,0,1,5,2,5,40,40,0,1
-Style: WM,MaruBuriOTF,70,{GRAY},&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,1,0,1,0,1,5,40,40,0,1
+Style: Title,{F_TITLE},{tsize},&H00FFFFFF,&H000000FF,&H00141414,&H64000000,0,0,0,0,100,100,0,0,1,3,3,8,40,40,0,1
+Style: Cap,{F_CAP},90,&H00FFFFFF,&H000000FF,&H00101010,&H80000000,0,0,0,0,100,100,0.5,0,1,6,2,5,40,40,0,1
+Style: WM,{F_WM},70,{GRAY},&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,1,0,1,0,1,5,40,40,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -122,12 +133,13 @@ def render(src, words, clip, crop, outdir):
     dur = c_end - c_start
     rel = [[w[0] - c_start, w[1] - c_start, w[2]] for w in ws]
     caps = chunk_captions(rel)
-    vid_w, vid_h, margin = geometry(crop)
+    vid_w, vid_h, margin = geometry()
+    zc = zoom_crop(crop)                                  # 얼굴 더 확대(풀와이드, 위아래 크롭)
     ass_path = os.path.join(outdir, name + ".ass")
     open(ass_path, "w", encoding="utf-8").write(
-        build_ass(clip["hook"], caps, dur, crop, clip.get("yellow", 2)))
+        build_ass(clip["hook"], caps, dur, clip.get("yellow", 2)))
     out_path = os.path.join(outdir, name + ".mp4")
-    vf = (f"crop={crop['w']}:{crop['h']}:{crop['x']}:{crop['y']},"
+    vf = (f"crop={zc['w']}:{zc['h']}:{zc['x']}:{zc['y']},"
           f"scale={vid_w}:{vid_h}:flags=lanczos,unsharp=5:5:0.9:5:5:0.0,"
           f"pad={W}:{H}:0:{margin}:color=black,"
           f"ass={ass_path}:fontsdir={FONTS}")
