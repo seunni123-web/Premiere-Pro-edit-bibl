@@ -269,11 +269,16 @@ def render(src, words, clip, crop, outdir):
     nxt = next((w for w in words if w[0] > last_end + 0.001), None)
     tail = 0.45 if nxt is None else max(0.05, min(0.45, nxt[0] - last_end - 0.08))
     c_start, c_end = ws[0][0], last_end + tail
+    # force_start: 발화 온셋 직전으로 강제(첫 단어 앞의 '아~'/숨을 잘라냄 — STT 단어 시각이 앞으로 패딩된 경우)
+    fs = clip.get("force_start")
+    if fs is not None and fs > c_start:
+        c_start = fs
+        ws = [w for w in ws if w[1] > fs + 0.05]
     # 구간 제거(숨소리 등): clips.json "remove": [[소스초, 소스초], ...]
     removes = sorted([max(c_start, a), min(c_end, b)] for a, b in (clip.get("remove") or []))
     removes = [r for r in removes if r[1] - r[0] > 0.02]
     dur = (c_end - c_start) - sum(b - a for a, b in removes)
-    rel = [[w[0] - c_start, w[1] - c_start, w[2]] for w in ws]
+    rel = [[max(0.0, w[0] - c_start), max(0.06, w[1] - c_start), w[2]] for w in ws]
     for a, b in sorted(((a - c_start, b - c_start) for a, b in removes), reverse=True):
         cut = b - a
         rel = [[(s - cut if s >= b else s), (e - cut if e >= b else min(e, a)), t]
