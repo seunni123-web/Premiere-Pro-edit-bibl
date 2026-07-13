@@ -47,20 +47,45 @@ def kchars(s):
     return len(s.replace(" ", ""))
 
 
-def chunk_captions(words, max_chars=7):
-    """7자 이내 '맥락' 단위. 단어 경계에서만(공백 유지) 끊되, 종결/연결어미 뒤를 우선 분절."""
+# 자막 끝에 매달리면 안 되는 말(관형사/접속사/불완전 조각) — 다음 자막으로 이월
+DANGLING = {"그", "이", "저", "한", "내", "제", "뭐", "좀", "더", "안", "못", "왜", "또",
+            "그러면", "그리고", "근데", "그래서", "이제", "일단", "이런", "저런", "어떤", "무슨"}
+
+
+def chunk_captions(words, min_chars=5, max_chars=9):
+    """5~9자 '맥락' 단위 자막.
+    규칙: ① 문장 끝(.?!)에서 무조건 끊는다(두 문장이 한 자막에 안 섞임)
+         ② 숫자 조각은 병합("0"+".4초"→"0.4초")
+         ③ 관형사/접속사로 자막이 끝나면 다음 자막으로 이월("…한", "…그러면 그" 방지)"""
+    merged = []
+    for w in words:
+        t = w[2]
+        if merged:
+            p = merged[-1][2]
+            near = w[0] - merged[-1][1] < 0.35
+            if near and (t.startswith(".") or (p and p[-1].isdigit() and t[0].isdigit())):
+                merged[-1] = [merged[-1][0], w[1], p + t]; continue
+        merged.append([w[0], w[1], t])
     caps, cur = [], []
-    ENDERS = ("다", "요", "죠", "고", "서", "은", "는", "을", "를", "의", "도", "만", "까", "네")
-    for i, w in enumerate(words):
+
+    def flush():
+        nonlocal cur
+        if cur:
+            caps.append([cur[0][0], cur[-1][1], " ".join(x[2] for x in cur)]); cur = []
+
+    for i, w in enumerate(merged):
         cur.append(w)
-        cur_txt = " ".join(x[2] for x in cur)
-        nxt = words[i + 1] if i + 1 < len(words) else None
-        over = nxt and kchars(cur_txt) + kchars(nxt[2]) > max_chars   # 다음 단어 넣으면 초과 → 여기서 끊음
-        end_ok = w[2].rstrip().rstrip(".").endswith(ENDERS) and kchars(cur_txt) >= 4
-        if nxt is None or over or end_ok:
-            caps.append([cur[0][0], cur[-1][1], cur_txt]); cur = []
-    if cur:
-        caps.append([cur[0][0], cur[-1][1], " ".join(x[2] for x in cur)])
+        n = kchars(" ".join(x[2] for x in cur))
+        nxt = merged[i + 1] if i + 1 < len(merged) else None
+        if w[2].rstrip().endswith((".", "?", "!")):       # 문장 경계 — 무조건 분절
+            flush(); continue
+        if nxt is None:
+            flush(); continue
+        if n + kchars(nxt[2]) > max_chars:                # 다음 단어를 넣으면 9자 초과
+            if len(cur) > 1 and w[2].strip() in DANGLING:
+                d = cur.pop(); flush(); cur = [d]         # 매달린 말은 다음 자막 머리로
+            else:
+                flush()
     return caps
 
 
@@ -78,23 +103,34 @@ def is_sent_end(words, i, gap_min=0.30):
     return t.endswith(("다", "요", "죠", "까")) and gap >= gap_min
 
 
-def snap_clip(words, start, end, min_dur=40.0, max_dur=60.0):
+def snap_clip(words, start, end, min_dur=40.0, max_dur=60.0,
+              start_exact=False, hard_end=None, end_exact=None):
     """구간을 문장 경계로 스냅. 시작=문장 첫 단어, 끝=min~max초 안의 마지막 문장 끝.
-    '시간 맞추기'보다 '한 편이 말이 되는 것'이 우선 — 문장 끝이 없으면 최대 +8초까지 연장."""
+    '시간 맞추기'보다 '한 편이 말이 되는 것'이 우선 — 문장 끝이 없으면 최대 +8초까지 연장.
+    start_exact: 후퇴 없이 start 직후 단어에서 그대로 시작(사용자 지정 시작).
+    hard_end: 이 시각 이전의 마지막 문장 끝에서 무조건 종료(사용자 지정 끝)."""
     idx = [i for i, w in enumerate(words) if w[1] > start - 4 and w[0] < end + 12]
     if not idx:
         return start, end, "(단어 없음)"
-    # 시작 스냅: 주어진 start 직후 첫 단어에서, 현재 문장의 시작(직전 문장 끝 다음)으로 후퇴(최대 4초)
     s_i = next((i for i in idx if words[i][0] >= start - 0.2), idx[0])
-    j = s_i
-    while j - 1 >= 0 and words[s_i][0] - words[j - 1][0] <= 6.0 and not is_sent_end(words, j - 1):
-        j -= 1
-    s_i = j
+    if not start_exact:
+        j = s_i
+        while j - 1 >= 0 and words[s_i][0] - words[j - 1][0] <= 6.0 and not is_sent_end(words, j - 1):
+            j -= 1
+        s_i = j
     t0 = words[s_i][0]
-    # 끝 스냅: [t0+min, t0+max] 안의 마지막 문장 끝. 없으면 max+8초까지 첫 문장 끝.
+    note = ""
+    if end_exact is not None:                             # 사용자 지정 끝(문장 탐색 없이 그 지점 단어까지)
+        e = [i for i in range(s_i, len(words)) if words[i][1] <= end_exact + 0.05]
+        if e:
+            return t0, words[e[-1]][1], "(정확 끝)"
+    if hard_end is not None:                              # 사용자 지정 끝 — 그 안의 마지막 문장 끝
+        cands = [i for i in range(s_i, len(words))
+                 if words[i][1] <= hard_end + 0.05 and is_sent_end(words, i)]
+        if cands:
+            return t0, words[cands[-1]][1], "(지정 끝)"
     cands = [i for i in range(s_i, len(words))
              if min_dur <= words[i][1] - t0 <= max_dur and is_sent_end(words, i)]
-    note = ""
     if cands:
         e_i = cands[-1]
     else:
@@ -218,38 +254,70 @@ def _apply_fix(t, fixes):
 def render(src, words, clip, crop, outdir):
     name = clip["name"]; start = float(clip["start"]); end = float(clip["end"])
     # 문장 경계 스냅: 시작=문장 첫 단어, 끝=40~60초 안 마지막 문장 끝(말이 되는 게 우선)
-    t0, t1, note = snap_clip(words, start, end)
+    t0, t1, note = snap_clip(words, start, end,
+                             max_dur=float(clip.get("max_dur", 60)),
+                             start_exact=bool(clip.get("start_exact")),
+                             hard_end=clip.get("hard_end"),
+                             end_exact=clip.get("end_exact"))
     ws = [w for w in words if t0 - 0.05 <= w[0] and w[1] <= t1 + 0.05]
     if not ws:
         print(f"[{name}] 구간 내 단어 없음 — 건너뜀"); return None
-    tail = " ".join(w[2] for w in ws[-6:])
-    print(f"[{name}] 문장 스냅 {note}  끝맺음: \"…{tail}\"")
-    c_start, c_end = ws[0][0], ws[-1][1] + 0.45
-    dur = c_end - c_start
+    tail_txt = " ".join(w[2] for w in ws[-6:])
+    print(f"[{name}] 문장 스냅 {note}  끝맺음: \"…{tail_txt}\"")
+    # 스마트 테일: 다음 발화 직전까지만(뒤 문장 첫음 '그래/특' 새어들기 방지) + 끝 페이드
+    last_end = ws[-1][1]
+    nxt = next((w for w in words if w[0] > last_end + 0.001), None)
+    tail = 0.45 if nxt is None else max(0.05, min(0.45, nxt[0] - last_end - 0.08))
+    c_start, c_end = ws[0][0], last_end + tail
+    # 구간 제거(숨소리 등): clips.json "remove": [[소스초, 소스초], ...]
+    removes = sorted([max(c_start, a), min(c_end, b)] for a, b in (clip.get("remove") or []))
+    removes = [r for r in removes if r[1] - r[0] > 0.02]
+    dur = (c_end - c_start) - sum(b - a for a, b in removes)
     rel = [[w[0] - c_start, w[1] - c_start, w[2]] for w in ws]
-    # STT 오인식 교정(clips.json의 "fix": {"오인식":"교정"}) — 자막이 발화 의미와 일치하게
+    for a, b in sorted(((a - c_start, b - c_start) for a, b in removes), reverse=True):
+        cut = b - a
+        rel = [[(s - cut if s >= b else s), (e - cut if e >= b else min(e, a)), t]
+               for s, e, t in rel if not (a <= s and e <= b)]
     fixes = clip.get("fix") or {}
     if fixes:
         rel = [[s, e, _apply_fix(t, fixes)] for s, e, t in rel]
-        rel = [w for w in rel if w[2].strip()]            # 교정으로 빈 단어가 되면 제거
+        rel = [w for w in rel if w[2].strip()]
     caps = chunk_captions(rel)
-    if fixes:                                             # 여러 단어에 걸친 교정("0 .4초"→"0.4초")
+    if fixes:
         caps = [[s, e, _apply_fix(t, fixes)] for s, e, t in caps]
     vid_w, vid_h, vid_y = geometry()
-    zc = zoom_crop(crop)                                  # 얼굴 더 확대(풀와이드, 위아래 크롭)
+    zc = zoom_crop(crop)
     ass_path = os.path.join(outdir, name + ".ass")
     open(ass_path, "w", encoding="utf-8").write(
         build_ass(clip["hook"], caps, dur, clip.get("yellow", 2)))
     out_path = os.path.join(outdir, name + ".mp4")
-    vf = (f"crop={zc['w']}:{zc['h']}:{zc['x']}:{zc['y']},"
-          f"scale={vid_w}:{vid_h}:flags=lanczos,unsharp=5:5:0.9:5:5:0.0,"
-          f"pad={W}:{H}:0:{vid_y}:color=black,"
-          f"ass={ass_path}:fontsdir={FONTS}")
+    vchain = (f"crop={zc['w']}:{zc['h']}:{zc['x']}:{zc['y']},"
+              f"scale={vid_w}:{vid_h}:flags=lanczos,unsharp=5:5:0.9:5:5:0.0,"
+              f"pad={W}:{H}:0:{vid_y}:color=black,"
+              f"ass={ass_path}:fontsdir={FONTS}")
+    achain = (f"loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000,"
+              f"afade=t=out:st={max(0.0, dur - 0.22):.2f}:d=0.22")
+    # 제거 구간 반영: keep 세그먼트를 trim/concat (제거 없으면 단일 세그먼트)
+    segs, pos = [], 0.0
+    for a, b in ((a - c_start, b - c_start) for a, b in removes):
+        if a > pos:
+            segs.append((pos, a))
+        pos = b
+    if c_end - c_start > pos:
+        segs.append((pos, c_end - c_start))
+    parts, cc = [], ""
+    for i, (a, b) in enumerate(segs):
+        parts.append(f"[0:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS[v{i}];"
+                     f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS[a{i}]")
+        cc += f"[v{i}][a{i}]"
+    fc = (";".join(parts) + f";{cc}concat=n={len(segs)}:v=1:a=1[vc][ac];"
+          f"[vc]{vchain}[vout];[ac]{achain}[aout]")
     cmd = ["ffmpeg", "-y", "-ss", f"{c_start:.3f}", "-to", f"{c_end:.3f}", "-i", src,
-           "-vf", vf, "-af", "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000",
+           "-filter_complex", fc, "-map", "[vout]", "-map", "[aout]",
            "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "192k", "-r", "30", out_path]
-    print(f"[{name}] {ass_time(c_start)}~{ass_time(c_end)} ({dur:.0f}s) 자막 {len(caps)}개 → 렌더...")
+    rm = f" 제거{len(removes)}곳" if removes else ""
+    print(f"[{name}] {ass_time(c_start)}~{ass_time(c_end)} ({dur:.0f}s) 자막 {len(caps)}개{rm} → 렌더...")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print("  에러:\n" + r.stderr[-1200:]); return None
