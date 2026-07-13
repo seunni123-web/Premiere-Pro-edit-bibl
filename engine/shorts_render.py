@@ -296,12 +296,15 @@ def render(src, words, clip, crop, outdir):
     open(ass_path, "w", encoding="utf-8").write(
         build_ass(clip["hook"], caps, dur, clip.get("yellow", 2)))
     out_path = os.path.join(outdir, name + ".mp4")
+    # 업로드 방탄: fps=30(CFR 강제·PTS 재생성)로 유튜브/인스타 '앞부분 빨리감기' 원천 차단
     vchain = (f"crop={zc['w']}:{zc['h']}:{zc['x']}:{zc['y']},"
               f"scale={vid_w}:{vid_h}:flags=lanczos,unsharp=5:5:0.9:5:5:0.0,"
-              f"pad={W}:{H}:0:{vid_y}:color=black,"
-              f"ass={ass_path}:fontsdir={FONTS}")
-    achain = (f"loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000,"
-              f"afade=t=out:st={max(0.0, dur - 0.22):.2f}:d=0.22")
+              f"fps=30,pad={W}:{H}:0:{vid_y}:color=black,"
+              f"ass={ass_path}:fontsdir={FONTS},setpts=PTS-STARTPTS")
+    achain = (f"loudnorm=I=-14:TP=-1.5:LRA=11,"
+              f"aresample=48000:async=1:first_pts=0,"
+              f"afade=t=out:st={max(0.0, dur - 0.22):.2f}:d=0.22,"
+              f"asetpts=PTS-STARTPTS")
     # 제거 구간 반영: keep 세그먼트를 trim/concat (제거 없으면 단일 세그먼트)
     segs, pos = [], 0.0
     for a, b in ((a - c_start, b - c_start) for a, b in removes):
@@ -320,14 +323,39 @@ def render(src, words, clip, crop, outdir):
     cmd = ["ffmpeg", "-y", "-ss", f"{c_start:.3f}", "-to", f"{c_end:.3f}", "-i", src,
            "-filter_complex", fc, "-map", "[vout]", "-map", "[aout]",
            "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-pix_fmt", "yuv420p",
-           "-c:a", "aac", "-b:a", "192k", "-r", "30", out_path]
+           "-bf", "0",  # B프레임 off: dts=pts → 시작 0.000 보장(업로드 플랫폼 최무해)
+           "-c:a", "aac", "-b:a", "192k",
+           "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out_path]
     rm = f" 제거{len(removes)}곳" if removes else ""
     print(f"[{name}] {ass_time(c_start)}~{ass_time(c_end)} ({dur:.0f}s) 자막 {len(caps)}개{rm} → 렌더...")
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print("  에러:\n" + r.stderr[-1200:]); return None
-    print(f"  완료 → {out_path}")
-    return out_path
+    ok, msg = verify_timestamps(out_path)
+    print(f"  {'완료' if ok else '[검증실패!]'} {msg} → {out_path}")
+    return out_path if ok else None
+
+
+def verify_timestamps(path):
+    """업로드 안전성 검증: 영상/오디오 start=0, 음수 PTS 0개, CFR 균일."""
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v",
+                            "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
+                           capture_output=True, text=True)
+        ts = sorted(float(x.strip().rstrip(",")) for x in r.stdout.splitlines()
+                    if x.strip().rstrip(","))
+        neg = sum(1 for t in ts if t < -0.001)
+        gaps = [round(b - a, 4) for a, b in zip(ts, ts[1:])]
+        irregular = sum(1 for g in gaps if abs(g - 1 / 30) > 0.003)
+        ra = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a",
+                             "-show_entries", "stream=start_time", "-of", "csv=p=0", path],
+                            capture_output=True, text=True)
+        a0 = float(ra.stdout.strip().rstrip(","))
+        # 시작 오프셋 1프레임(33ms) 이내는 표준(AAC priming 상쇄) — 빨리감기 원인은 음수/불균일 PTS
+        ok = abs(ts[0]) < 0.034 and neg == 0 and irregular == 0 and -0.001 <= a0 < 0.05
+        return ok, (f"(검증: v0={ts[0]:.3f} a0={a0:.3f} 음수{neg} 불균일{irregular})")
+    except Exception as e:
+        return False, f"(검증 오류: {e})"
 
 
 def main():
