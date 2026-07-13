@@ -119,6 +119,45 @@ def split2(hook):
     return best[1], best[2]
 
 
+def detect_pip(src, t):
+    """t초 프레임에서 웹캠 PIP의 흰 라운드 테두리 박스를 감지(밝기>225의 긴 직선 런).
+    성공 시 테두리 외곽 박스 dict(w,h,x,y), 실패 시 None."""
+    try:
+        import numpy as np
+        r = subprocess.run(['ffmpeg', '-ss', str(t), '-i', src, '-frames:v', '1',
+                            '-f', 'rawvideo', '-pix_fmt', 'gray', '-'],
+                           capture_output=True)
+        g = np.frombuffer(r.stdout, dtype=np.uint8)
+        if g.size < 1920 * 1080:
+            return None
+        g = g[:1920 * 1080].reshape(1080, 1920)
+        bright = g > 225
+
+        def runs(mask_2d, axis_len, other_len, get_line):
+            hits = []
+            for i in range(axis_len):
+                line = get_line(i)
+                best = cur = 0
+                for v in line:
+                    cur = cur + 1 if v else 0
+                    best = max(best, cur)
+                if best >= 220:
+                    hits.append(i)
+            return hits
+
+        rows = runs(bright, 1080, 1920, lambda y: bright[y])
+        cols = runs(bright, 1920, 1080, lambda x: bright[:, x])
+        if not rows or not cols:
+            return None
+        x0, x1 = min(cols), max(cols)
+        y0, y1 = min(rows), max(rows)
+        if x1 - x0 < 200 or y1 - y0 < 200:                # 너무 작으면 오탐
+            return None
+        return dict(w=x1 - x0, h=y1 - y0, x=x0, y=y0)
+    except Exception:
+        return None
+
+
 def zoom_crop(crop, inset=CROP_INSET):
     """얼굴 영역(crop)에서 테두리 인셋만큼 안으로 들어간 뒤, 풀와이드(W)×VID_H 비율로 잘라낸다.
     좌우는 꽉 채우고(비지 않게), 위아래를 잘라 얼굴 크게 + PIP 흰 라운드 테두리 제거."""
@@ -224,14 +263,25 @@ def main():
     ap.add_argument("--crop", default=None, help="w:h:x:y (얼굴 웹캠 영역, 소스 픽셀)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
-    crop = DEFAULT_CROP
+    cli_crop = None
     if a.crop:
-        w, h, x, y = (int(v) for v in a.crop.split(":")); crop = dict(w=w, h=h, x=x, y=y)
+        w, h, x, y = (int(v) for v in a.crop.split(":")); cli_crop = dict(w=w, h=h, x=x, y=y)
     outdir = a.out or os.path.join(os.path.dirname(a.source) or ".", "shorts")
     os.makedirs(outdir, exist_ok=True)
     words = [tuple(x) for x in json.load(open(a.words, encoding="utf-8"))]
     clips = json.load(open(a.clips, encoding="utf-8"))
     for c in clips:
+        # 크롭 우선순위: --crop 명시 > 클립 중간 시점 PIP 자동 감지 > 기본값
+        crop = cli_crop
+        if crop is None:
+            mid = (float(c["start"]) + float(c["end"])) / 2
+            crop = detect_pip(a.source, mid)
+            if crop:
+                print(f"[{c['name']}] PIP 자동 감지: x={crop['x']} y={crop['y']} "
+                      f"w={crop['w']} h={crop['h']}")
+            else:
+                crop = DEFAULT_CROP
+                print(f"[{c['name']}] PIP 감지 실패 → 기본 크롭 사용(확인 필요)")
         render(a.source, words, c, crop, outdir)
 
 
