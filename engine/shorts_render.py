@@ -23,8 +23,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FONTS = os.path.join(HERE, "assets", "fonts")
 
 W, H = 1080, 1920
-VID_H = 1500              # 영상(얼굴) 세로 크기 — 크게(더 확대). 세로 중앙 + 위아래 동일 여백.
-CAP_FRAC = 0.70           # 얼굴 아래(가슴 위) 자막 세로 위치(영상 영역 비율)
+# ── 템플릿 지오메트리(비블 확정 레퍼런스 실측, 2026-07) ──
+VID_H = 1030              # 영상(얼굴) 세로 크기
+VID_Y = 532               # 영상 상단(위 여백 = 제목 존)
+TITLE_Y = 250             # 제목 블록 상단(an8)
+CAP_FRAC = 0.62           # 자막 세로 위치(영상 영역 비율 — 얼굴 아래)
+WM_GAP = 55               # 워터마크: 영상 바로 아래 간격
 WATERMARK = "비블 bibl"
 YELLOW = r"&H0022CCFF&"    # 골드 옐로 (BGR: R255 G204 B34)
 WHITE = r"&H00FFFFFF&"
@@ -33,8 +37,10 @@ GRAY = r"&H00CFCFCF&"
 F_TITLE = "Paperlogy 9 Black"
 F_CAP = "Noto Sans CJK KR Black"
 F_WM = "MaruBuriot-SemiBold"
-# 비블 슬라이드+PIP 소스 기본 웹캠(얼굴) 영역. 이 안에서 9:16-세로로 더 확대 크롭.
+# 비블 슬라이드+PIP 소스 기본 웹캠(얼굴) 영역.
+# INSET: PIP의 흰 라운드 테두리가 화면에 걸리지 않게 안쪽으로 파고 들어가 크롭.
 DEFAULT_CROP = dict(w=430, h=486, x=1486, y=474)
+CROP_INSET = 14
 
 
 def kchars(s):
@@ -63,6 +69,45 @@ def ass_time(t):
     return f"{int(t//3600):d}:{int((t%3600)//60):02d}:{t%60:05.2f}"
 
 
+def is_sent_end(words, i, gap_min=0.30):
+    """words[i]가 문장 끝인가 — 구두점(.?!) 또는 종결어미(다/요/죠/까)+뒤 쉼."""
+    t = words[i][2].rstrip()
+    if t.endswith((".", "?", "!")):
+        return True
+    gap = (words[i + 1][0] - words[i][1]) if i + 1 < len(words) else 9.9
+    return t.endswith(("다", "요", "죠", "까")) and gap >= gap_min
+
+
+def snap_clip(words, start, end, min_dur=40.0, max_dur=60.0):
+    """구간을 문장 경계로 스냅. 시작=문장 첫 단어, 끝=min~max초 안의 마지막 문장 끝.
+    '시간 맞추기'보다 '한 편이 말이 되는 것'이 우선 — 문장 끝이 없으면 최대 +8초까지 연장."""
+    idx = [i for i, w in enumerate(words) if w[1] > start - 4 and w[0] < end + 12]
+    if not idx:
+        return start, end, "(단어 없음)"
+    # 시작 스냅: 주어진 start 직후 첫 단어에서, 현재 문장의 시작(직전 문장 끝 다음)으로 후퇴(최대 4초)
+    s_i = next((i for i in idx if words[i][0] >= start - 0.2), idx[0])
+    j = s_i
+    while j - 1 >= 0 and words[s_i][0] - words[j - 1][0] <= 6.0 and not is_sent_end(words, j - 1):
+        j -= 1
+    s_i = j
+    t0 = words[s_i][0]
+    # 끝 스냅: [t0+min, t0+max] 안의 마지막 문장 끝. 없으면 max+8초까지 첫 문장 끝.
+    cands = [i for i in range(s_i, len(words))
+             if min_dur <= words[i][1] - t0 <= max_dur and is_sent_end(words, i)]
+    note = ""
+    if cands:
+        e_i = cands[-1]
+    else:
+        after = [i for i in range(s_i, len(words))
+                 if max_dur < words[i][1] - t0 <= max_dur + 8 and is_sent_end(words, i)]
+        if after:
+            e_i = after[0]; note = f"(문장 완결 위해 {words[e_i][1]-t0:.0f}s로 연장)"
+        else:
+            e_i = max(i for i in range(s_i, len(words)) if words[i][1] - t0 <= max_dur)
+            note = "(문장 끝 못 찾음 — 확인 필요)"
+    return t0, words[e_i][1], note
+
+
 def split2(hook):
     if " " not in hook:
         return hook, ""
@@ -74,27 +119,28 @@ def split2(hook):
     return best[1], best[2]
 
 
-def zoom_crop(crop):
-    """얼굴 영역(crop) 안에서 풀와이드(W)×VID_H 비율로 더 확대해 잘라낸다.
-    좌우는 꽉 채우고(비지 않게), 위아래를 필요한 만큼 잘라 얼굴을 크게."""
-    aspect = W / VID_H                                    # 목표 영상 가로세로비 (0.72)
-    zw = min(crop["w"], round(crop["h"] * aspect))
-    zh = min(crop["h"], round(zw / aspect))
-    zx = crop["x"] + (crop["w"] - zw) // 2
-    zy = crop["y"] + (crop["h"] - zh) // 2                # 얼굴 중앙 기준 위아래 균등 크롭
+def zoom_crop(crop, inset=CROP_INSET):
+    """얼굴 영역(crop)에서 테두리 인셋만큼 안으로 들어간 뒤, 풀와이드(W)×VID_H 비율로 잘라낸다.
+    좌우는 꽉 채우고(비지 않게), 위아래를 잘라 얼굴 크게 + PIP 흰 라운드 테두리 제거."""
+    cw, ch = crop["w"] - 2 * inset, crop["h"] - 2 * inset
+    cx, cy = crop["x"] + inset, crop["y"] + inset
+    aspect = W / VID_H                                    # 목표 가로세로비 (1080/1030)
+    zw = min(cw, round(ch * aspect))
+    zh = min(ch, round(zw / aspect))
+    zx = cx + (cw - zw) // 2
+    zy = cy + (ch - zh) // 2                              # 얼굴 중앙 기준 위아래 균등 크롭
     return dict(w=int(zw), h=int(zh), x=int(zx), y=int(zy))
 
 
 def geometry():
-    """풀와이드 + 세로 중앙 + 위아래 동일 여백."""
-    margin = (H - VID_H) // 2
-    return W, VID_H, margin
+    """템플릿 배치: 위 여백(제목 존) VID_Y, 영상 VID_H, 아래 여백 나머지."""
+    return W, VID_H, VID_Y
 
 
 def build_ass(hook, caps, dur, yellow_line=2):
-    vid_w, vid_h, margin = geometry()
-    cap_y = margin + int(vid_h * CAP_FRAC)
-    wm_y = H - margin // 2
+    vid_w, vid_h, vid_y = geometry()
+    cap_y = vid_y + int(vid_h * CAP_FRAC)
+    wm_y = vid_y + vid_h + WM_GAP
     l1, l2 = split2(hook)
     maxlen = max(kchars(l1), kchars(l2))
     tsize = 120 if maxlen <= 8 else (114 if maxlen <= 10 else 108)   # 지정 110~120
@@ -117,23 +163,40 @@ Style: WM,{F_WM},70,{GRAY},&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,1,0
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    ev = [f"Dialogue: 0,{ass_time(0)},{ass_time(dur)},Title,,0,0,0,,{{\\pos({W//2},40)}}{title}",
+    ev = [f"Dialogue: 0,{ass_time(0)},{ass_time(dur)},Title,,0,0,0,,{{\\pos({W//2},{TITLE_Y})}}{title}",
           f"Dialogue: 0,{ass_time(0)},{ass_time(dur)},WM,,0,0,0,,{{\\pos({W//2},{wm_y})\\fax0.12}}{WATERMARK}"]
     for s, e, txt in caps:
         ev.append(f"Dialogue: 0,{ass_time(s)},{ass_time(e)},Cap,,0,0,0,,{{\\pos({W//2},{cap_y})}}{txt.strip()}")
     return head + "\n".join(ev) + "\n"
 
 
+def _apply_fix(t, fixes):
+    for k, v in fixes.items():
+        t = t.replace(k, v)
+    return t
+
+
 def render(src, words, clip, crop, outdir):
     name = clip["name"]; start = float(clip["start"]); end = float(clip["end"])
-    ws = [w for w in words if w[0] >= start - 0.4 and w[1] <= end + 0.4 and w[0] < end]
+    # 문장 경계 스냅: 시작=문장 첫 단어, 끝=40~60초 안 마지막 문장 끝(말이 되는 게 우선)
+    t0, t1, note = snap_clip(words, start, end)
+    ws = [w for w in words if t0 - 0.05 <= w[0] and w[1] <= t1 + 0.05]
     if not ws:
         print(f"[{name}] 구간 내 단어 없음 — 건너뜀"); return None
-    c_start, c_end = ws[0][0], ws[-1][1] + 0.25
+    tail = " ".join(w[2] for w in ws[-6:])
+    print(f"[{name}] 문장 스냅 {note}  끝맺음: \"…{tail}\"")
+    c_start, c_end = ws[0][0], ws[-1][1] + 0.45
     dur = c_end - c_start
     rel = [[w[0] - c_start, w[1] - c_start, w[2]] for w in ws]
+    # STT 오인식 교정(clips.json의 "fix": {"오인식":"교정"}) — 자막이 발화 의미와 일치하게
+    fixes = clip.get("fix") or {}
+    if fixes:
+        rel = [[s, e, _apply_fix(t, fixes)] for s, e, t in rel]
+        rel = [w for w in rel if w[2].strip()]            # 교정으로 빈 단어가 되면 제거
     caps = chunk_captions(rel)
-    vid_w, vid_h, margin = geometry()
+    if fixes:                                             # 여러 단어에 걸친 교정("0 .4초"→"0.4초")
+        caps = [[s, e, _apply_fix(t, fixes)] for s, e, t in caps]
+    vid_w, vid_h, vid_y = geometry()
     zc = zoom_crop(crop)                                  # 얼굴 더 확대(풀와이드, 위아래 크롭)
     ass_path = os.path.join(outdir, name + ".ass")
     open(ass_path, "w", encoding="utf-8").write(
@@ -141,7 +204,7 @@ def render(src, words, clip, crop, outdir):
     out_path = os.path.join(outdir, name + ".mp4")
     vf = (f"crop={zc['w']}:{zc['h']}:{zc['x']}:{zc['y']},"
           f"scale={vid_w}:{vid_h}:flags=lanczos,unsharp=5:5:0.9:5:5:0.0,"
-          f"pad={W}:{H}:0:{margin}:color=black,"
+          f"pad={W}:{H}:0:{vid_y}:color=black,"
           f"ass={ass_path}:fontsdir={FONTS}")
     cmd = ["ffmpeg", "-y", "-ss", f"{c_start:.3f}", "-to", f"{c_end:.3f}", "-i", src,
            "-vf", vf, "-af", "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000",
