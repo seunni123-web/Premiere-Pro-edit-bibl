@@ -302,7 +302,7 @@ def render(src, words, clip, crop, outdir):
               f"fps=30,pad={W}:{H}:0:{vid_y}:color=black,"
               f"ass={ass_path}:fontsdir={FONTS},setpts=PTS-STARTPTS")
     achain = (f"loudnorm=I=-14:TP=-1.5:LRA=11,"
-              f"aresample=48000:async=1:first_pts=0,"
+              f"aresample=48000,"
               f"afade=t=out:st={max(0.0, dur - 0.22):.2f}:d=0.22,"
               f"asetpts=PTS-STARTPTS")
     # 제거 구간 반영: keep 세그먼트를 trim/concat (제거 없으면 단일 세그먼트)
@@ -339,8 +339,10 @@ def render(src, words, clip, crop, outdir):
         print("  에러:\n" + r.stderr[-1200:]); return None
     ok, msg = verify_timestamps(out_path)
     ok2, msg2 = verify_content(out_path, src, c_start, zc, vid_w, vid_h)
-    print(f"  {'완료' if (ok and ok2) else '[검증실패!]'} {msg} {msg2} → {out_path}")
-    return out_path if (ok and ok2) else None
+    ok3, msg3 = verify_audio_head(out_path)
+    allok = ok and ok2 and ok3
+    print(f"  {'완료' if allok else '[검증실패!]'} {msg} {msg2} {msg3} → {out_path}")
+    return out_path if allok else None
 
 
 def _grab_gray(path, t, vf, w, h):
@@ -350,6 +352,22 @@ def _grab_gray(path, t, vf, w, h):
                        capture_output=True)
     g = np.frombuffer(r.stdout, dtype=np.uint8)
     return g[:w * h].reshape(h, w).astype(int) if g.size >= w * h else None
+
+
+def verify_audio_head(out_path):
+    """오디오 헤드 검증: 첫 1.3초가 무음이 아닌지(클립은 발화로 시작 — 앞 무음 삽입 버그 감지)."""
+    try:
+        r = subprocess.run(["ffmpeg", "-i", out_path, "-t", "1.3",
+                            "-af", "volumedetect", "-f", "null", "-"],
+                           capture_output=True, text=True)
+        import re as _re
+        m = _re.search(r"mean_volume:\s*(-?[\d.]+)", r.stderr)
+        if not m:
+            return False, "(오디오헤드 측정 실패)"
+        mv = float(m.group(1))
+        return mv > -45.0, f"(음성헤드 {mv:.0f}dB{' 무음!' if mv <= -45 else ''})"
+    except Exception as e:
+        return False, f"(오디오헤드 오류: {e})"
 
 
 def verify_content(out_path, src, c_start, zc, vid_w, vid_h):
