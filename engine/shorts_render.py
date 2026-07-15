@@ -189,9 +189,38 @@ def detect_pip(src, t):
         y0, y1 = min(rows), max(rows)
         if x1 - x0 < 200 or y1 - y0 < 200:                # 너무 작으면 오탐
             return None
+        # 너무 크면 오탐: 화면공유(브라우저 흰 요소) 구간에서 화면 전체를 박스로 오인하는 케이스
+        if x1 - x0 > 900 or y1 - y0 > 750:
+            return None
         return dict(w=x1 - x0, h=y1 - y0, x=x0, y=y0)
     except Exception:
         return None
+
+
+def detect_pip_robust(src, times, duration=None):
+    """여러 지점에서 PIP 감지 후 합의. 클립 지점들이 전부 실패(화면공유 등)하면
+    소스 전역 지점을 추가 시도(웹캠 위치는 영상 내내 동일하다는 가정)."""
+    results = []
+    for t in times:
+        r = detect_pip(src, t)
+        if r:
+            results.append(r)
+    if not results and duration:
+        for frac in (0.1, 0.3, 0.5, 0.7, 0.9):
+            r = detect_pip(src, duration * frac)
+            if r:
+                results.append(r)
+            if len(results) >= 2:
+                break
+    if not results:
+        return None
+    # 첫 결과와 30px 이내로 일치하는 것들의 평균
+    base = results[0]
+    close = [r for r in results
+             if abs(r["x"] - base["x"]) < 30 and abs(r["y"] - base["y"]) < 30]
+    n = len(close)
+    return dict(w=sum(r["w"] for r in close) // n, h=sum(r["h"] for r in close) // n,
+                x=sum(r["x"] for r in close) // n, y=sum(r["y"] for r in close) // n)
 
 
 def zoom_crop(crop, inset=CROP_INSET):
@@ -251,8 +280,11 @@ def _apply_fix(t, fixes):
     return t
 
 
-def render(src, words, clip, crop, outdir):
-    name = clip["name"]; start = float(clip["start"]); end = float(clip["end"])
+def prepare_clip(words, clip):
+    """클립 준비(렌더/XML 공통): 문장 스냅 → 스마트 테일 → force_start → 구간 제거 → 자막 청킹.
+    반환 dict: c_start/c_end(소스 절대초), removes(절대), segs(상대 keep 구간),
+              dur(출력 길이), caps(출력 타임라인 자막), note, tail_txt. 단어 없으면 None."""
+    start = float(clip["start"]); end = float(clip["end"])
     # 문장 경계 스냅: 시작=문장 첫 단어, 끝=40~60초 안 마지막 문장 끝(말이 되는 게 우선)
     t0, t1, note = snap_clip(words, start, end,
                              max_dur=float(clip.get("max_dur", 60)),
@@ -261,9 +293,8 @@ def render(src, words, clip, crop, outdir):
                              end_exact=clip.get("end_exact"))
     ws = [w for w in words if t0 - 0.05 <= w[0] and w[1] <= t1 + 0.05]
     if not ws:
-        print(f"[{name}] 구간 내 단어 없음 — 건너뜀"); return None
+        return None
     tail_txt = " ".join(w[2] for w in ws[-6:])
-    print(f"[{name}] 문장 스냅 {note}  끝맺음: \"…{tail_txt}\"")
     # 스마트 테일: 다음 발화 직전까지만(뒤 문장 첫음 '그래/특' 새어들기 방지) + 끝 페이드
     last_end = ws[-1][1]
     nxt = next((w for w in words if w[0] > last_end + 0.001), None)
@@ -281,7 +312,9 @@ def render(src, words, clip, crop, outdir):
     rel = [[max(0.0, w[0] - c_start), max(0.06, w[1] - c_start), w[2]] for w in ws]
     for a, b in sorted(((a - c_start, b - c_start) for a, b in removes), reverse=True):
         cut = b - a
-        rel = [[(s - cut if s >= b else s), (e - cut if e >= b else min(e, a)), t]
+        # 제거 구간에 걸친 단어: 시작이 구간 안이면 구간 끝(=a)으로 클램프(안 하면 시작>끝 자막)
+        rel = [[(s - cut if s >= b else (a if s > a else s)),
+                (e - cut if e >= b else min(e, a)), t]
                for s, e, t in rel if not (a <= s and e <= b)]
     fixes = clip.get("fix") or {}
     if fixes:
@@ -290,6 +323,26 @@ def render(src, words, clip, crop, outdir):
     caps = chunk_captions(rel)
     if fixes:
         caps = [[s, e, _apply_fix(t, fixes)] for s, e, t in caps]
+    # keep 세그먼트(상대 시간): 제거 구간을 뺀 나머지
+    segs, pos = [], 0.0
+    for a, b in ((a - c_start, b - c_start) for a, b in removes):
+        if a > pos:
+            segs.append((pos, a))
+        pos = b
+    if c_end - c_start > pos:
+        segs.append((pos, c_end - c_start))
+    return dict(c_start=c_start, c_end=c_end, removes=removes, segs=segs,
+                dur=dur, caps=caps, note=note, tail_txt=tail_txt)
+
+
+def render(src, words, clip, crop, outdir):
+    name = clip["name"]
+    p = prepare_clip(words, clip)
+    if p is None:
+        print(f"[{name}] 구간 내 단어 없음 — 건너뜀"); return None
+    c_start, c_end, dur = p["c_start"], p["c_end"], p["dur"]
+    removes, segs, caps = p["removes"], p["segs"], p["caps"]
+    print(f"[{name}] 문장 스냅 {p['note']}  끝맺음: \"…{p['tail_txt']}\"")
     vid_w, vid_h, vid_y = geometry()
     zc = zoom_crop(crop)
     ass_path = os.path.join(outdir, name + ".ass")
@@ -305,14 +358,7 @@ def render(src, words, clip, crop, outdir):
               f"aresample=48000,"
               f"afade=t=out:st={max(0.0, dur - 0.22):.2f}:d=0.22,"
               f"asetpts=PTS-STARTPTS")
-    # 제거 구간 반영: keep 세그먼트를 trim/concat (제거 없으면 단일 세그먼트)
-    segs, pos = [], 0.0
-    for a, b in ((a - c_start, b - c_start) for a, b in removes):
-        if a > pos:
-            segs.append((pos, a))
-        pos = b
-    if c_end - c_start > pos:
-        segs.append((pos, c_end - c_start))
+    # 제거 구간 반영: keep 세그먼트(segs)를 trim/concat (제거 없으면 단일 세그먼트)
     # ── 핵심: -copyts + 절대시간 trim ──
     # 입력 시킹(-ss)은 키프레임으로 점프하며 시크 지점 이전 '프리롤' 프레임을 흘려보낼 수 있고,
     # 그 프레임들이 첫 2~3초 빨리감기(내용이 앞당겨 압축 재생)로 나타난다.
@@ -415,6 +461,15 @@ def verify_timestamps(path):
         return False, f"(검증 오류: {e})"
 
 
+def src_duration(path):
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                            "-of", "csv=p=0", path], capture_output=True, text=True)
+        return float(r.stdout.strip())
+    except Exception:
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("source"); ap.add_argument("words"); ap.add_argument("clips")
@@ -432,8 +487,9 @@ def main():
         # 크롭 우선순위: --crop 명시 > 클립 중간 시점 PIP 자동 감지 > 기본값
         crop = cli_crop
         if crop is None:
-            mid = (float(c["start"]) + float(c["end"])) / 2
-            crop = detect_pip(a.source, mid)
+            s0, e0 = float(c["start"]), float(c["end"])
+            crop = detect_pip_robust(a.source, [s0 + 1, (s0 + e0) / 2, e0 - 2],
+                                     duration=src_duration(a.source))
             if crop:
                 print(f"[{c['name']}] PIP 자동 감지: x={crop['x']} y={crop['y']} "
                       f"w={crop['w']} h={crop['h']}")

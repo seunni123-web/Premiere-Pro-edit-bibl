@@ -8,10 +8,12 @@ model: opus
 
 긴 영상에서 **혼자 봐도 말이 되는 1분 쇼츠 5~10개**를 뽑아 만든다. 강한 한 순간이 아니라 **설정→훅→결론**이 담긴 자체 완결 클립. (온디맨드 — 컷편집 파이프라인에서 자동 실행 X)
 
-## 세 가지 제작 모드 (소스·납품처에 따라 선택)
-- **모드 R · 완성형 번인 MP4 (권장, 비블 템플릿)** — 하이라이트 구간 + 후킹만 정하면 `engine/shorts_render.py`가 **프리미어 '비블-쇼츠' 템플릿을 번인한 완성 세로 MP4**를 뽑는다. 후킹 검사 → 승인 후 제작.
+## 제작 모드 (소스·납품처에 따라 선택)
+- **모드 P · 프리미어 편집용 XML (기본, 2026-07-15 비블 확정)** — `engine/shorts_premiere.py`가 비블-쇼츠 템플릿을 **프리미어에서 수정 가능한 XML**로 뽑는다: V1 얼굴 클립 MP4(텍스트 없음, 크롭·컷·음량 완료, 1080x1920 풀프레임) + V2 자막 PNG(발화 싱크) + V3 키워드 그래픽 오버레이 + V4 제목 + V5 워터마크, 클립별 SRT 동봉. 여러 클립이 XML 1개(시퀀스 N개)로 열린다. 비블은 마지막 수정 후 내보내기만. 후킹 검사 → 승인 후 제작.
+  `python3 engine/shorts_premiere.py <source.mp4> <words.json> <clips.json> [--out DIR] [--only 이름] [--force]`
+- **모드 R · 완성형 번인 MP4 (직접 업로드용, 요청 시에만)** — `engine/shorts_render.py`가 템플릿을 번인한 완성 세로 MP4를 뽑는다.
   `python3 engine/shorts_render.py <source.mp4> <words.json> <clips.json> [--crop w:h:x:y]`
-  clips.json: `[{"name","start","end","hook","yellow"(1|2)}, ...]` (start/end=소스 초).
+  clips.json 공통: `[{"name","start","end","hook","yellow"(1|2),"start_exact","hard_end","end_exact","max_dur","force_start","remove","fix"}, ...]` (start/end=소스 초).
 - **모드 A · 컷 기반 XML** — auto_cut 결과가 있고 프리미어에서 더 손볼 때: `python3 engine/shorts_cut.py <원본> "MM:SS-MM:SS" ...`(컷 타임라인 기준). keep만 모은 타이트 9:16 + 6~7자 SRT.
 - **모드 B · 완성 롱폼 XML** — 편집 끝난 mp4만 있을 때: `python3 engine/shorts_xml.py "롱폼.mp4" "in-out" ...`.
 
