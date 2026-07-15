@@ -313,14 +313,20 @@ def render(src, words, clip, crop, outdir):
         pos = b
     if c_end - c_start > pos:
         segs.append((pos, c_end - c_start))
+    # ── 핵심: -copyts + 절대시간 trim ──
+    # 입력 시킹(-ss)은 키프레임으로 점프하며 시크 지점 이전 '프리롤' 프레임을 흘려보낼 수 있고,
+    # 그 프레임들이 첫 2~3초 빨리감기(내용이 앞당겨 압축 재생)로 나타난다.
+    # -copyts로 원본 절대 타임스탬프를 유지하면 trim=start=<절대초>가 프리롤을 결정적으로 잘라낸다.
     parts, cc = [], ""
     for i, (a, b) in enumerate(segs):
-        parts.append(f"[0:v]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS[v{i}];"
-                     f"[0:a]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS[a{i}]")
+        parts.append(f"[0:v]trim=start={c_start + a:.3f}:end={c_start + b:.3f},setpts=PTS-STARTPTS[v{i}];"
+                     f"[0:a]atrim=start={c_start + a:.3f}:end={c_start + b:.3f},asetpts=PTS-STARTPTS[a{i}]")
         cc += f"[v{i}][a{i}]"
     fc = (";".join(parts) + f";{cc}concat=n={len(segs)}:v=1:a=1[vc][ac];"
           f"[vc]{vchain}[vout];[ac]{achain}[aout]")
-    cmd = ["ffmpeg", "-y", "-ss", f"{c_start:.3f}", "-to", f"{c_end:.3f}", "-i", src,
+    seek = max(0.0, c_start - 6.0)                       # 키프레임 여유(프리롤은 trim이 자름)
+    cmd = ["ffmpeg", "-y", "-ss", f"{seek:.3f}", "-to", f"{c_end + 0.5:.3f}", "-i", src,
+           "-copyts",
            "-filter_complex", fc, "-map", "[vout]", "-map", "[aout]",
            "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-pix_fmt", "yuv420p",
            "-bf", "0",  # B프레임 off: dts=pts → 시작 0.000 보장(업로드 플랫폼 최무해)
@@ -332,8 +338,41 @@ def render(src, words, clip, crop, outdir):
     if r.returncode != 0:
         print("  에러:\n" + r.stderr[-1200:]); return None
     ok, msg = verify_timestamps(out_path)
-    print(f"  {'완료' if ok else '[검증실패!]'} {msg} → {out_path}")
-    return out_path if ok else None
+    ok2, msg2 = verify_content(out_path, src, c_start, zc, vid_w, vid_h)
+    print(f"  {'완료' if (ok and ok2) else '[검증실패!]'} {msg} {msg2} → {out_path}")
+    return out_path if (ok and ok2) else None
+
+
+def _grab_gray(path, t, vf, w, h):
+    import numpy as np
+    r = subprocess.run(["ffmpeg", "-ss", f"{t:.3f}", "-i", path, "-frames:v", "1",
+                        "-vf", vf, "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                       capture_output=True)
+    g = np.frombuffer(r.stdout, dtype=np.uint8)
+    return g[:w * h].reshape(h, w).astype(int) if g.size >= w * h else None
+
+
+def verify_content(out_path, src, c_start, zc, vid_w, vid_h):
+    """내용 검증: 출력 첫 부분 프레임이 소스의 '같은 시점' 프레임과 일치하는지(빨리감기/프리롤 오염 감지).
+    출력 영상영역 상단(얼굴)과 소스 zoom_crop 동일 영역을 픽셀 대조(MAD)."""
+    try:
+        import numpy as np
+        half_h = 480                                       # 영상영역 상단(자막·제목 안 겹침)
+        checks = []
+        for t in (0.5, 1.5, 2.5):
+            o = _grab_gray(out_path, t,
+                           f"crop={W}:{half_h}:0:{VID_Y}, scale=96:64", 96, 64)
+            s = _grab_gray(src, c_start + t,
+                           f"crop={zc['w']}:{int(zc['h']*half_h/vid_h)}:{zc['x']}:{zc['y']},scale=96:64",
+                           96, 64)
+            if o is None or s is None:
+                return False, "(내용검증 프레임 실패)"
+            checks.append(float(np.abs(o - s).mean()))
+        bad = [c for c in checks if c > 26]
+        ok = len(bad) == 0
+        return ok, f"(내용 MAD={','.join(f'{c:.0f}' for c in checks)}{' 불일치!' if not ok else ''})"
+    except Exception as e:
+        return False, f"(내용검증 오류: {e})"
 
 
 def verify_timestamps(path):
