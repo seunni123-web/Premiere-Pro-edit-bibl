@@ -352,7 +352,7 @@ def render(src, words, clip, crop, outdir):
     # 업로드 방탄: fps=30(CFR 강제·PTS 재생성)로 유튜브/인스타 '앞부분 빨리감기' 원천 차단
     vchain = (f"crop={zc['w']}:{zc['h']}:{zc['x']}:{zc['y']},"
               f"scale={vid_w}:{vid_h}:flags=lanczos,unsharp=5:5:0.9:5:5:0.0,"
-              f"fps=30,pad={W}:{H}:0:{vid_y}:color=black,"
+              f"fps=30,pad={W}:{H}:0:{vid_y}:color=black,setsar=1,"
               f"ass={ass_path}:fontsdir={FONTS},setpts=PTS-STARTPTS")
     achain = (f"loudnorm=I=-14:TP=-1.5:LRA=11,"
               f"aresample=48000,"

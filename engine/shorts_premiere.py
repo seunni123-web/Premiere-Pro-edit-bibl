@@ -137,9 +137,11 @@ def png_overlay(txt, path):
 def render_clean(src, p, zc, out_path):
     """번인 렌더와 동일 체인(크롭·컷·음량·방탄 인코딩)에서 ass 자막만 뺀 얼굴 클립."""
     c_start, c_end, dur, segs = p["c_start"], p["c_end"], p["dur"], p["segs"]
+    # setsar=1 필수: crop→scale은 DAR 보존을 위해 비정규 SAR(예 1751:1752)을 심는데,
+    # 프리미어가 임의 SAR을 오해석해 화면이 찌그러진다(2026-07-16 비블 리포트).
     vchain = (f"crop={zc['w']}:{zc['h']}:{zc['x']}:{zc['y']},"
               f"scale={W}:{VID_H}:flags=lanczos,unsharp=5:5:0.9:5:5:0.0,"
-              f"fps={FPS},pad={W}:{H}:0:{VID_Y}:color=black,setpts=PTS-STARTPTS")
+              f"fps={FPS},pad={W}:{H}:0:{VID_Y}:color=black,setsar=1,setpts=PTS-STARTPTS")
     achain = (f"loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000,"
               f"afade=t=out:st={max(0.0, dur - 0.22):.2f}:d=0.22,asetpts=PTS-STARTPTS")
     parts, cc = [], ""
@@ -199,15 +201,16 @@ def file_ref(path, fid, kind, dur_f=None):
         return f'<file id="{_filedefs[path]}"/>'
     _filedefs[path] = fid
     name = xesc(os.path.basename(path))
+    sc = (f'{RATE}<width>{W}</width><height>{H}</height>'
+          f'<anamorphic>FALSE</anamorphic><pixelaspectratio>square</pixelaspectratio>'
+          f'<fielddominance>none</fielddominance>')
     if kind == "av":
-        media = (f'<media><video><samplecharacteristics>{RATE}<width>{W}</width>'
-                 f'<height>{H}</height></samplecharacteristics></video>'
+        media = (f'<media><video><samplecharacteristics>{sc}</samplecharacteristics></video>'
                  f'<audio><samplecharacteristics><depth>16</depth>'
                  f'<samplerate>48000</samplerate></samplecharacteristics>'
                  f'<channelcount>2</channelcount></audio></media>')
     else:                                       # png still
-        media = (f'<media><video><samplecharacteristics>{RATE}<width>{W}</width>'
-                 f'<height>{H}</height></samplecharacteristics></video></media>')
+        media = f'<media><video><samplecharacteristics>{sc}</samplecharacteristics></video></media>'
     d = f"<duration>{dur_f}</duration>" if dur_f else ""
     return (f'<file id="{fid}"><name>{name}</name><pathurl>{xesc(purl(path))}</pathurl>'
             f'{RATE}{d}{media}</file>')
