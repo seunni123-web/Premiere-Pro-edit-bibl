@@ -24,7 +24,7 @@ from urllib.parse import quote
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from shorts_render import (W, H, VID_H, VID_Y, TITLE_Y, CAP_FRAC, WM_GAP, WATERMARK,
-                           FONTS, DEFAULT_CROP, kchars, split2, prepare_clip,
+                           FONTS, DEFAULT_CROP, CROP_INSET, kchars, split2, prepare_clip,
                            detect_pip_robust, zoom_crop, src_duration, ass_time,
                            verify_timestamps, verify_content, verify_audio_head)
 
