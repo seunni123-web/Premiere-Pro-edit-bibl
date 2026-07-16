@@ -263,10 +263,30 @@ def build_sequence(si, name, mp4, F, cap_items, ov_items, title_png, wm_png):
 </sequence>"""
 
 
-def pick_overlays(name, caps, dur):
-    """자막에서 키워드 문구를 찾아 (초 시작, 초 끝, 표시문구) — 겹치면 앞 것을 줄임."""
+def face_crop(timeline, c_start, c_end, removes):
+    """풀프레임 토킹헤드 소스: 얼굴 타임라인(0.5s 샘플, 640x360 스케일)에서
+    클립 구간 얼굴 중앙값 기준 고정 크롭. 하단은 소스 번인자막 존(y>950) 회피."""
+    import statistics as st
+    pts = [b for t, b in timeline
+           if c_start <= t <= c_end and b and not any(a <= t <= r for a, r in removes)]
+    if len(pts) < 4:
+        return None
+    cx = st.median([(b[0] + b[2] / 2) * 3 for b in pts])
+    cy = st.median([(b[1] + b[3] / 2) * 3 for b in pts])
+    fh = st.median([b[3] * 3 for b in pts])
+    ch = max(520, min(700, int(round(fh * 2.4 / 2) * 2)))     # 얼굴이 세로 ~42%
+    cw = int(round(ch * W / VID_H / 2) * 2)
+    x0 = int(max(0, min(1920 - cw, cx - cw / 2)))
+    y0 = int(max(0, min(1080 - ch, 950 - ch, cy - ch * 0.40)))
+    return dict(w=cw, h=ch, x=x0, y=y0)
+
+
+def pick_overlays(clip, caps, dur):
+    """자막에서 키워드 문구를 찾아 (초 시작, 초 끝, 표시문구) — 겹치면 앞 것을 줄임.
+    키워드: clips.json "overlays": [["찾을 문구","표시 문구"],...] 우선, 없으면 OVERLAYS[이름]."""
     found = []
-    for search, disp in OVERLAYS.get(name, []):
+    pairs = clip.get("overlays") or OVERLAYS.get(clip["name"], [])
+    for search, disp in pairs:
         for s, e, txt in caps:
             if search.replace(" ", "") in txt.replace(" ", ""):
                 found.append([s, min(dur, max(e, s + 2.2) + 0.6), disp])
@@ -287,7 +307,10 @@ def main():
     ap.add_argument("--only", default=None, help="이름에 이 조각이 든 클립만")
     ap.add_argument("--force", action="store_true", help="얼굴 클립 MP4 재렌더")
     ap.add_argument("--crop", default=None, help="w:h:x:y 수동 크롭")
+    ap.add_argument("--faces", default=None,
+                    help="얼굴 타임라인 JSON([[t,[x,y,w,h,conf]|null],...], 640x360 스케일) — 풀프레임 소스용")
     a = ap.parse_args()
+    faces_tl = json.load(open(a.faces, encoding="utf-8")) if a.faces else None
     base = a.out or os.path.join(os.path.dirname(a.source) or ".", "프리미어")
     d_clip = os.path.join(base, "클립"); d_gfx = os.path.join(base, "그래픽")
     d_srt = os.path.join(base, "자막SRT")
@@ -313,11 +336,17 @@ def main():
         if p is None:
             print(f"[{name}] 구간 내 단어 없음 — 건너뜀"); continue
         crop = cli_crop
-        if crop is None:
+        inset = CROP_INSET if cli_crop else 0               # --crop은 PIP 박스 관례(테두리 인셋)
+        if crop is None and faces_tl:                       # 풀프레임 소스: 얼굴 크롭 우선
+            crop = face_crop(faces_tl, p["c_start"], p["c_end"], p["removes"])
+            if crop:
+                print(f"  얼굴 크롭: x={crop['x']} y={crop['y']} w={crop['w']} h={crop['h']}")
+        if crop is None:                                    # 슬라이드+PIP 소스: 흰 테두리 감지
             s0, e0 = float(c["start"]), float(c["end"])
             crop = detect_pip_robust(a.source, [s0 + 1, (s0 + e0) / 2, e0 - 2],
                                      duration=src_duration(a.source)) or DEFAULT_CROP
-        zc = zoom_crop(crop)
+            inset = CROP_INSET
+        zc = zoom_crop(crop, inset)
         F = int(round(p["dur"] * FPS))
         print(f"[{name}] {ass_time(p['c_start'])}~{ass_time(p['c_end'])} "
               f"({p['dur']:.0f}s, {F}f) 자막 {len(p['caps'])}개")
@@ -340,7 +369,7 @@ def main():
             if ef > sf:
                 cap_items.append((sf, ef, txt, cp))
         ov_items = []
-        for i, (s, e, disp) in enumerate(pick_overlays(name, p["caps"], p["dur"])):
+        for i, (s, e, disp) in enumerate(pick_overlays(c, p["caps"], p["dur"])):
             op = os.path.join(gdir, f"오버레이_{i}_{disp.replace(' ', '')[:10]}.png")
             png_overlay(disp, op)
             ov_items.append((int(round(s * FPS)), min(F, int(round(e * FPS))), disp, op))
