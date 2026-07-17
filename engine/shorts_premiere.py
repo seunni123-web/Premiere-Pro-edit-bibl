@@ -142,12 +142,15 @@ def render_clean(src, p, zc, out_path):
         cc += f"[v{i}][a{i}]"
     fc = (";".join(parts) + f";{cc}concat=n={len(segs)}:v=1:a=1[vc][ac];"
           f"[vc]{vchain}[vout];[ac]{achain}[aout]")
+    # 프리미어 편집용 구조(2026-07-17 비블 리포트로 확정): MOV + PCM + 짧은 GOP + 에디트리스트 없음.
+    # AAC(프라이밍 1024샘플)+make_zero는 비디오에 21ms 지연 elst를 만들고, 프리미어(MediaCore)가
+    # 이를 오해석해 앞 0~4초 버벅임/말 중복/자막 싱크 어긋남 발생. PCM이면 시프트 자체가 없다.
     seek = max(0.0, c_start - 6.0)
     cmd = ["ffmpeg", "-y", "-ss", f"{seek:.3f}", "-to", f"{c_end + 0.5:.3f}", "-i", src,
            "-copyts", "-filter_complex", fc, "-map", "[vout]", "-map", "[aout]",
            "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p",
-           "-bf", "0", "-c:a", "aac", "-b:a", "192k",
-           "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", out_path]
+           "-bf", "0", "-g", "15", "-keyint_min", "15",
+           "-c:a", "pcm_s16le", "-use_editlist", "0", out_path]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print("  에러:\n" + r.stderr[-1200:]); return False
@@ -345,7 +348,7 @@ def main():
         print(f"[{name}] {ass_time(p['c_start'])}~{ass_time(p['c_end'])} "
               f"({p['dur']:.0f}s, {F}f) 자막 {len(p['caps'])}개")
 
-        mp4 = os.path.join(d_clip, name + ".mp4")
+        mp4 = os.path.join(d_clip, name + ".mov")
         if a.force or not os.path.exists(mp4):
             print("  얼굴 클립 렌더 중...")
             if not render_clean(a.source, p, zc, mp4):
