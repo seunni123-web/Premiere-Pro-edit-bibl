@@ -89,10 +89,10 @@ def png_title(hook, yellow_line, path):
 
 
 def png_caption(txt, path):
-    """자막 — Noto Sans KR Black 90, 흰색+외곽선, 얼굴 아래 중앙."""
+    """자막 — Noto Sans KR Black 118(2026-07-17 비블 레퍼런스 확정), 흰색+외곽선, 얼굴 아래 중앙."""
     img = _canvas()
-    _draw_text(img, (W // 2, CAP_Y), txt.strip(), _font(F_CAP_P, 90), WHITE,
-               stroke=6, stroke_fill=(16, 16, 16, 255), shadow=2, shadow_alpha=128)
+    _draw_text(img, (W // 2, CAP_Y), txt.strip(), _font(F_CAP_P, 118), WHITE,
+               stroke=7, stroke_fill=(16, 16, 16, 255), shadow=3, shadow_alpha=128)
     img.save(path)
 
 
@@ -125,14 +125,42 @@ def png_overlay(txt, path):
 
 # ───────────────────────── 얼굴 클립(텍스트 없음) 렌더 ─────────────────────────
 
-def render_clean(src, p, zc, out_path):
-    """번인 렌더와 동일 체인(크롭·컷·음량·방탄 인코딩)에서 ass 자막만 뺀 얼굴 클립."""
+def make_round_mask(w, h, r, path):
+    """블러-와이드 전경용 라운드 사각형 알파 마스크(웹캠 소스의 흰 라운드 모서리 은폐)."""
+    from PIL import Image, ImageDraw
+    m = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(m).rounded_rectangle([0, 0, w - 1, h - 1], radius=r, fill=255)
+    m.save(path)
+
+
+def render_clean(src, p, zc, out_path, pip_wide=None):
+    """번인 렌더와 동일 체인(크롭·컷·음량·방탄 인코딩)에서 ass 자막만 뺀 얼굴 클립.
+    pip_wide: 웹캠 PIP 와이드 구도(2026-07-17 비블 확정) — 웹캠 세로 전체(가슴·손 포함)를
+    존 높이에 맞추고 좌우는 같은 소스의 블러 배경으로 채움. dict(mask=마스크PNG경로)."""
     c_start, c_end, dur, segs = p["c_start"], p["c_end"], p["dur"], p["segs"]
     # setsar=1 필수: crop→scale은 DAR 보존을 위해 비정규 SAR(예 1751:1752)을 심는데,
     # 프리미어가 임의 SAR을 오해석해 화면이 찌그러진다(2026-07-16 비블 리포트).
-    vchain = (f"crop={zc['w']}:{zc['h']}:{zc['x']}:{zc['y']},"
-              f"scale={W}:{VID_H}:flags=lanczos,unsharp=5:5:0.9:5:5:0.0,"
-              f"fps={FPS},pad={W}:{H}:0:{VID_Y}:color=black,setsar=1,setpts=PTS-STARTPTS")
+    if pip_wide:
+        # 웹캠 세로 전체(가슴·손) 전경 + 같은 소스 블러 배경. 인셋 22로 라운드 모서리 배제
+        # (알파 마스크 금지 — 무한 정지 이미지 입력 + alphamerge는 ffmpeg가 행에 빠짐).
+        fgw = int(round(VID_H * zc["w"] / zc["h"] / 2) * 2)
+        fx = (W - fgw) // 2
+        # 블러 배경은 저해상도(1/8)에서 블러 후 업스케일(원해상도 gblur는 10배 이상 느림)
+        sw = 136
+        sh = int(round(sw * zc["h"] / zc["w"] / 2) * 2)
+        sc = int(round(VID_H * sw / W / 2) * 2)
+        vchain = (f"crop={zc['w']}:{zc['h']}:{zc['x']}:{zc['y']},split=2[cc0][cc1];"
+                  f"[cc0]scale={sw}:{sh},crop={sw}:{sc}:0:{max(0, (sh - sc) // 2)},"
+                  f"gblur=sigma=6,scale={W}:{VID_H},"
+                  f"colorchannelmixer=.45:0:0:0:0:.45:0:0:0:0:.45[bgw];"
+                  f"[cc1]scale={fgw}:{VID_H}:flags=lanczos,unsharp=5:5:0.9:5:5:0.0[fgs];"
+                  f"[bgw][fgs]overlay={fx}:0,"
+                  f"fps={FPS},pad={W}:{H}:0:{VID_Y}:color=black,setsar=1,setpts=PTS-STARTPTS")
+        pip_wide["fgw"], pip_wide["fx"] = fgw, fx
+    else:
+        vchain = (f"crop={zc['w']}:{zc['h']}:{zc['x']}:{zc['y']},"
+                  f"scale={W}:{VID_H}:flags=lanczos,unsharp=5:5:0.9:5:5:0.0,"
+                  f"fps={FPS},pad={W}:{H}:0:{VID_Y}:color=black,setsar=1,setpts=PTS-STARTPTS")
     achain = (f"loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000,"
               f"afade=t=out:st={max(0.0, dur - 0.22):.2f}:d=0.22,asetpts=PTS-STARTPTS")
     parts, cc = [], ""
@@ -146,16 +174,20 @@ def render_clean(src, p, zc, out_path):
     # AAC(프라이밍 1024샘플)+make_zero는 비디오에 21ms 지연 elst를 만들고, 프리미어(MediaCore)가
     # 이를 오해석해 앞 0~4초 버벅임/말 중복/자막 싱크 어긋남 발생. PCM이면 시프트 자체가 없다.
     seek = max(0.0, c_start - 6.0)
-    cmd = ["ffmpeg", "-y", "-ss", f"{seek:.3f}", "-to", f"{c_end + 0.5:.3f}", "-i", src,
-           "-copyts", "-filter_complex", fc, "-map", "[vout]", "-map", "[aout]",
-           "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p",
-           "-bf", "0", "-g", "15", "-keyint_min", "15",
-           "-c:a", "pcm_s16le", "-use_editlist", "0", out_path]
+    cmd = (["ffmpeg", "-y", "-ss", f"{seek:.3f}", "-to", f"{c_end + 0.5:.3f}", "-i", src]
+           + ["-copyts", "-filter_complex", fc, "-map", "[vout]", "-map", "[aout]",
+              "-c:v", "libx264", "-preset", "medium", "-crf", "17", "-pix_fmt", "yuv420p",
+              "-bf", "0", "-g", "15", "-keyint_min", "15",
+              "-c:a", "pcm_s16le", "-use_editlist", "0", out_path])
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print("  에러:\n" + r.stderr[-1200:]); return False
     ok, m1 = verify_timestamps(out_path)
-    ok2, m2 = verify_content(out_path, src, c_start, zc, W, VID_H)
+    if pip_wide:
+        ok2, m2 = verify_content(out_path, src, c_start, zc, pip_wide["fgw"], VID_H,
+                                 out_x=pip_wide["fx"], out_w=pip_wide["fgw"])
+    else:
+        ok2, m2 = verify_content(out_path, src, c_start, zc, W, VID_H)
     ok3, m3 = verify_audio_head(out_path)
     print(f"  {'검증OK' if ok and ok2 and ok3 else '[검증실패!]'} {m1} {m2} {m3}")
     return ok and ok2 and ok3
@@ -340,12 +372,19 @@ def main():
             crop = face_crop(faces_tl, p["c_start"], p["c_end"], p["removes"])
             if crop:
                 print(f"  얼굴 크롭: x={crop['x']} y={crop['y']} w={crop['w']} h={crop['h']}")
+        pip_wide = None
         if crop is None:                                    # 슬라이드+PIP 소스: 흰 테두리 감지
             s0, e0 = float(c["start"]), float(c["end"])
             crop = detect_pip_robust(a.source, [s0 + 1, (s0 + e0) / 2, e0 - 2],
                                      duration=src_duration(a.source)) or DEFAULT_CROP
-            inset = CROP_INSET
-        zc = zoom_crop(crop, inset)
+            # 와이드 구도(2026-07-17 비블 확정): 웹캠 내부 전체(세로 풀) + 좌우 블러 채움
+            wi = CROP_INSET + 8                             # 인셋 22: 라운드 모서리까지 배제
+            zc = dict(w=crop["w"] - 2 * wi, h=crop["h"] - 2 * wi,
+                      x=crop["x"] + wi, y=crop["y"] + wi)
+            pip_wide = dict()
+            print(f"  웹캠 와이드: 내부 {zc['w']}x{zc['h']} + 좌우 블러 채움")
+        else:
+            zc = zoom_crop(crop, inset)
         F = int(round(p["dur"] * FPS))
         print(f"[{name}] {ass_time(p['c_start'])}~{ass_time(p['c_end'])} "
               f"({p['dur']:.0f}s, {F}f) 자막 {len(p['caps'])}개")
@@ -353,7 +392,7 @@ def main():
         mp4 = os.path.join(d_clip, name + ".mov")
         if a.force or not os.path.exists(mp4):
             print("  얼굴 클립 렌더 중...")
-            if not render_clean(a.source, p, zc, mp4):
+            if not render_clean(a.source, p, zc, mp4, pip_wide=pip_wide):
                 print(f"  [{name}] 렌더 실패 — 건너뜀"); continue
 
         gdir = os.path.join(d_gfx, name)

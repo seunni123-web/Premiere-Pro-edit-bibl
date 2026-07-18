@@ -47,16 +47,22 @@ def kchars(s):
     return len(s.replace(" ", ""))
 
 
-# 자막 끝에 매달리면 안 되는 말(관형사/접속사/불완전 조각) — 다음 자막으로 이월
-DANGLING = {"그", "이", "저", "한", "내", "제", "뭐", "좀", "더", "안", "못", "왜", "또",
-            "그러면", "그리고", "근데", "그래서", "이제", "일단", "이런", "저런", "어떤", "무슨"}
+# 어절 완결 신호(이 글자로 끝나면 독립 자막 가능 — 뒤 어절을 붙이지 않음)
+JOSA_END = set("은는이가을를에의도만와과로게며요죠다서든까")
+# 조사로 끝나도 실제로는 독립 완결인 어절(대명사+조사)
+STANDALONE = {"나는", "저는", "내가", "제가", "우리는", "저희는", "이건", "그건", "저건"}
+# 1자인데 앞이 아니라 '다음' 자막 머리로 가야 하는 말(관형/부정/접속)
+FWD_ONE = {"그", "이", "저", "안", "못", "왜", "또", "좀", "더", "꼭", "막", "딱"}
 
 
-def chunk_captions(words, min_chars=5, max_chars=9):
-    """5~9자 '맥락' 단위 자막.
-    규칙: ① 문장 끝(.?!)에서 무조건 끊는다(두 문장이 한 자막에 안 섞임)
-         ② 숫자 조각은 병합("0"+".4초"→"0.4초")
-         ③ 관형사/접속사로 자막이 끝나면 다음 자막으로 이월("…한", "…그러면 그" 방지)"""
+def chunk_captions(words, min_chars=2, max_chars=8):
+    """어절 단위 '맥락' 자막(2026-07-17 비블 확정 — 4~8자, 짧은 리듬).
+    기본 1어절 = 1자막. 미완결 어절만 병합:
+      ① 1자 어절은 앞 자막에 붙임(때/것/수…), 단 관형·접속 1자(그/안/못…)는 다음 머리로
+      ② 무조사 짧은 어절(처음/초보…)과 연결어미(-지/-고/-나)는 다음 어절과 병합
+      ③ 목적어+기능동사 병합(포기를 합니다)
+      ④ 문장 끝(.?!) 무조건 분절, 숫자 조각 병합(0+.4초→0.4초)
+    예: 처음 영상을/올리고도/조회수가/오르지 않을 때/대부분/…/쉽게/포기를 합니다"""
     merged = []
     for w in words:
         t = w[2]
@@ -73,19 +79,35 @@ def chunk_captions(words, min_chars=5, max_chars=9):
         if cur:
             caps.append([cur[0][0], cur[-1][1], " ".join(x[2] for x in cur)]); cur = []
 
-    for i, w in enumerate(merged):
-        cur.append(w)
-        n = kchars(" ".join(x[2] for x in cur))
-        nxt = merged[i + 1] if i + 1 < len(merged) else None
-        if w[2].rstrip().endswith((".", "?", "!")):       # 문장 경계 — 무조건 분절
-            flush(); continue
-        if nxt is None:
-            flush(); continue
-        if n + kchars(nxt[2]) > max_chars:                # 다음 단어를 넣으면 9자 초과
-            if len(cur) > 1 and w[2].strip() in DANGLING:
-                d = cur.pop(); flush(); cur = [d]         # 매달린 말은 다음 자막 머리로
+    for w in merged:
+        t = w[2].strip()
+        core = t.rstrip(".?!")
+        if cur:
+            prev = cur[-1][2].strip()
+            prev_core = prev.rstrip(".?!")
+            prev_end = prev_core[-1] if prev_core else ""
+            comb = kchars(" ".join(x[2] for x in cur)) + kchars(t)
+            attach = False
+            if not prev.endswith((".", "?", "!")) and comb <= max_chars:
+                if kchars(core) == 1 and core not in FWD_ONE:          # ① 1자는 앞에
+                    attach = True
+                elif prev_core in FWD_ONE:                             # 관형 1자 뒤는 이어감
+                    attach = True
+                elif (prev_core not in STANDALONE and
+                      ((len(prev_core) <= 2 and prev_end not in JOSA_END) or
+                       (len(prev_core) <= 3 and prev_end in "지고나"))):  # ② 미완결 어절
+                    attach = True
+                elif prev_end in "를을" and core[:1] in "하합했되돼됩된":  # ③ 목적어+기능동사
+                    attach = True
+            if attach:
+                cur.append(w)
             else:
-                flush()
+                flush(); cur = [w]
+        else:
+            cur = [w]
+        if t.endswith((".", "?", "!")):                                # ④ 문장 경계
+            flush()
+    flush()
     return caps
 
 
@@ -261,7 +283,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Title,{F_TITLE},{tsize},&H00FFFFFF,&H000000FF,&H00141414,&H64000000,0,0,0,0,100,100,0,0,1,3,3,8,40,40,0,1
-Style: Cap,{F_CAP},90,&H00FFFFFF,&H000000FF,&H00101010,&H80000000,0,0,0,0,100,100,0.5,0,1,6,2,5,40,40,0,1
+Style: Cap,{F_CAP},118,&H00FFFFFF,&H000000FF,&H00101010,&H80000000,0,0,0,0,100,100,0.5,0,1,7,3,5,40,40,0,1
 Style: WM,{F_WM},70,{GRAY},&H000000FF,&H00000000,&H00000000,0,-1,0,0,100,100,1,0,1,0,1,5,40,40,0,1
 
 [Events]
@@ -416,16 +438,18 @@ def verify_audio_head(out_path):
         return False, f"(오디오헤드 오류: {e})"
 
 
-def verify_content(out_path, src, c_start, zc, vid_w, vid_h):
+def verify_content(out_path, src, c_start, zc, vid_w, vid_h, out_x=0, out_w=None):
     """내용 검증: 출력 첫 부분 프레임이 소스의 '같은 시점' 프레임과 일치하는지(빨리감기/프리롤 오염 감지).
-    출력 영상영역 상단(얼굴)과 소스 zoom_crop 동일 영역을 픽셀 대조(MAD)."""
+    출력 영상영역 상단(얼굴)과 소스 zoom_crop 동일 영역을 픽셀 대조(MAD).
+    out_x/out_w: 출력에서 비교할 가로 구간(웹캠 와이드 모드의 전경 영역 지정용, 기본 풀폭)."""
     try:
         import numpy as np
         half_h = 480                                       # 영상영역 상단(자막·제목 안 겹침)
+        ow = out_w or W
         checks = []
         for t in (0.5, 1.5, 2.5):
             o = _grab_gray(out_path, t,
-                           f"crop={W}:{half_h}:0:{VID_Y}, scale=96:64", 96, 64)
+                           f"crop={ow}:{half_h}:{out_x}:{VID_Y}, scale=96:64", 96, 64)
             s = _grab_gray(src, c_start + t,
                            f"crop={zc['w']}:{int(zc['h']*half_h/vid_h)}:{zc['x']}:{zc['y']},scale=96:64",
                            96, 64)
