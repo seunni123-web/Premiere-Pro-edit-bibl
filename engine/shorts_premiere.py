@@ -271,10 +271,12 @@ def face_crop(timeline, c_start, c_end, removes):
     cx = st.median([(b[0] + b[2] / 2) * 3 for b in pts])
     cy = st.median([(b[1] + b[3] / 2) * 3 for b in pts])
     fh = st.median([b[3] * 3 for b in pts])
-    ch = max(520, min(700, int(round(fh * 2.4 / 2) * 2)))     # 얼굴이 세로 ~42%
+    # 와이드 프레이밍(2026-07-17 비블 레퍼런스 확정): 얼굴이 세로 ~27%, 상체·손까지.
+    # 하한 968 = 소스 번인 자막(y978) 회피. 소스 화각 한계 내 최대 와이드.
+    ch = max(720, min(966, int(round(fh * 3.6 / 2) * 2)))
     cw = int(round(ch * W / VID_H / 2) * 2)
     x0 = int(max(0, min(1920 - cw, cx - cw / 2)))
-    y0 = int(max(0, min(1080 - ch, 950 - ch, cy - ch * 0.40)))
+    y0 = int(max(0, min(1080 - ch, 968 - ch, cy - ch * 0.36)))
     return dict(w=cw, h=ch, x=x0, y=y0)
 
 
