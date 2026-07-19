@@ -123,6 +123,36 @@ def png_overlay(txt, path):
     img.save(path)
 
 
+def refine_start(src, t0, zc=None, cut_win=0.30, card_win=0.30):
+    """시작 정밀 보정(2026-07-19 비블 리포트: '앞 1~2프레임 덜 잘림').
+    STT 단어 시작보다 소스의 컷 전환이 1~2프레임 늦으면 이전 장면/카드 꼬리가 남는다.
+    시작 직후 cut_win초 안의 장면 전환(프레임 MAD>18)이나 card_win초 안의 흰 카드 꼬리를
+    찾아 그 직후 프레임으로 시작을 당긴다. 반환: 보정된 시작(보정 없으면 t0)."""
+    import numpy as np
+    span = card_win + 0.10
+    vf = (f"crop={zc['w']}:{zc['h']}:{zc['x']}:{zc['y']}," if zc else "") + "scale=96:54"
+    r = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{max(0, t0 - 0.02):.3f}",
+                        "-t", f"{span:.3f}", "-i", src,
+                        "-vf", vf, "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                       capture_output=True)
+    g = np.frombuffer(r.stdout, dtype=np.uint8)
+    n = g.size // (96 * 54)
+    if n < 3:
+        return t0
+    g = g[:n * 96 * 54].reshape(n, 54, 96).astype(int)
+    dt = span / n
+    cand = 0
+    cuts = [i for i in range(1, n) if np.abs(g[i] - g[i - 1]).mean() > 18]
+    if cuts and cuts[-1] * dt <= cut_win + 0.02:
+        cand = max(cand, cuts[-1])
+    white = [i for i in range(n) if (g[i] > 215).mean() > 0.06]
+    if white and (white[-1] + 1) * dt <= card_win + 0.02:
+        cand = max(cand, white[-1] + 1)
+    if cand == 0:
+        return t0
+    return round(t0 - 0.02 + cand * dt + 0.006, 3)
+
+
 # ───────────────────────── 얼굴 클립(텍스트 없음) 렌더 ─────────────────────────
 
 def make_round_mask(w, h, r, path):
@@ -292,7 +322,7 @@ def build_sequence(si, name, mp4, F, cap_items, ov_items, title_png, wm_png):
 </sequence>"""
 
 
-def face_crop(timeline, c_start, c_end, removes):
+def face_crop(timeline, c_start, c_end, removes, sub_top=968):
     """풀프레임 토킹헤드 소스: 얼굴 타임라인(0.5s 샘플, 640x360 스케일)에서
     클립 구간 얼굴 중앙값 기준 고정 크롭. 하단은 소스 번인자막 존(y>950) 회피."""
     import statistics as st
@@ -308,7 +338,7 @@ def face_crop(timeline, c_start, c_end, removes):
     ch = max(720, min(966, int(round(fh * 3.6 / 2) * 2)))
     cw = int(round(ch * W / VID_H / 2) * 2)
     x0 = int(max(0, min(1920 - cw, cx - cw / 2)))
-    y0 = int(max(0, min(1080 - ch, 968 - ch, cy - ch * 0.36)))
+    y0 = int(max(0, min(1080 - ch, sub_top - ch, cy - ch * 0.36)))
     return dict(w=cw, h=ch, x=x0, y=y0)
 
 
@@ -338,6 +368,8 @@ def main():
     ap.add_argument("--only", default=None, help="이름에 이 조각이 든 클립만")
     ap.add_argument("--force", action="store_true", help="얼굴 클립 MP4 재렌더")
     ap.add_argument("--crop", default=None, help="w:h:x:y 수동 크롭")
+    ap.add_argument("--sub-top", type=int, default=968,
+                    help="소스 번인 자막 상단 y(크롭 하한) — 소스마다 측정해 지정")
     ap.add_argument("--faces", default=None,
                     help="얼굴 타임라인 JSON([[t,[x,y,w,h,conf]|null],...], 640x360 스케일) — 풀프레임 소스용")
     a = ap.parse_args()
@@ -369,7 +401,8 @@ def main():
         crop = cli_crop
         inset = CROP_INSET if cli_crop else 0               # --crop은 PIP 박스 관례(테두리 인셋)
         if crop is None and faces_tl:                       # 풀프레임 소스: 얼굴 크롭 우선
-            crop = face_crop(faces_tl, p["c_start"], p["c_end"], p["removes"])
+            crop = face_crop(faces_tl, p["c_start"], p["c_end"], p["removes"],
+                             sub_top=a.sub_top)
             if crop:
                 print(f"  얼굴 크롭: x={crop['x']} y={crop['y']} w={crop['w']} h={crop['h']}")
         pip_wide = None
@@ -385,6 +418,13 @@ def main():
             print(f"  웹캠 와이드: 내부 {zc['w']}x{zc['h']} + 좌우 블러 채움")
         else:
             zc = zoom_crop(crop, inset)
+        rs = refine_start(a.source, p["c_start"], zc)
+        if rs > p["c_start"] + 0.01:
+            print(f"  시작 보정 +{rs - p['c_start']:.2f}s (이전 컷/카드 꼬리 제거)")
+            c = dict(c, force_start=rs)
+            p = prepare_clip(words, c)
+            if p is None:
+                print(f"[{name}] 보정 후 단어 없음 — 건너뜀"); continue
         F = int(round(p["dur"] * FPS))
         print(f"[{name}] {ass_time(p['c_start'])}~{ass_time(p['c_end'])} "
               f"({p['dur']:.0f}s, {F}f) 자막 {len(p['caps'])}개")
