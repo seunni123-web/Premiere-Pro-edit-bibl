@@ -688,12 +688,13 @@ def main():
             print(f"   [주의] HTML 리포트 건너뜀: {ex}")
     print(f"\n   프리미어 > 파일 > 가져오기 로 .xml 불러오세요.")
     if len(keeps) > 1:
-        print(f"   자연스러움 팁: 타임라인 전체 선택 → Cmd+Shift+D 하면")
+        sc = "Ctrl+Shift+D" if os.name == "nt" else "Cmd+Shift+D"
+        print(f"   자연스러움 팁: 타임라인 전체 선택 → {sc} 하면")
         print(f"      모든 컷에 기본 오디오 전환이 적용돼 클릭음 없이 부드러워집니다.")
         rep_path2 = os.path.join(outdir, base + "_cut_report.txt")
         with open(rep_path2, "a", encoding="utf-8") as f:
             f.write("━━━ 다듬기 팁 ━━━\n")
-            f.write("  컷 부드럽게: 프리미어 타임라인 전체 선택 → Cmd+Shift+D (모든 컷에 기본 오디오 전환)\n")
+            f.write(f"  컷 부드럽게: 프리미어 타임라인 전체 선택 → {sc} (모든 컷에 기본 오디오 전환)\n")
             f.write("  자연스러움 주의 구간은 위 목록 참고 — 너무 촘촘하면 일부 컷 되돌려 호흡 살리기\n\n")
 
 
