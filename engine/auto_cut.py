@@ -686,6 +686,16 @@ def main():
             print(f"   리포트 : {os.path.basename(hp)}  (브라우저로 열어 검토)")
         except Exception as ex:
             print(f"   [주의] HTML 리포트 건너뜀: {ex}")
+    if CFG.get("CAPCUT_MP4"):
+        try:
+            import capcut_render
+            cc_out = os.path.join(outdir, base + "_capcut.mp4")
+            capcut_render.render(video, xml_out, wav_out, cc_out)
+            print(f"   캡컷   : {os.path.basename(cc_out)}")
+            print(f"\n   캡컷 > 미디어 가져오기로 _capcut.mp4 → 텍스트 > 로컬 자막 가져오기로 .srt")
+            return
+        except Exception as ex:
+            print(f"   [주의] 캡컷 MP4 렌더 실패 — XML은 정상: {ex}")
     print(f"\n   프리미어 > 파일 > 가져오기 로 .xml 불러오세요.")
     if len(keeps) > 1:
         sc = "Ctrl+Shift+D" if os.name == "nt" else "Cmd+Shift+D"
